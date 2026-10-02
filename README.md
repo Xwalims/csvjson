@@ -11,6 +11,23 @@ embedded newlines, embedded delimiters, `""` escapes and all.
 $ npm install -g csvjson
 ```
 
+<!-- hero -->
+
+[![CI](https://github.com/csvjson/actions/workflows/ci.yml/badge.svg)](https://github.com/csvjson/actions/workflows/ci.yml)
+![node 20+](https://img.shields.io/badge/node-20+-brightgreen)
+![MIT](https://img.shields.io/badge/license-MIT-blue.svg)
+![dependencies](https://img.shields.io/badge/dependencies-none-2f6f4f)
+
+## Contents
+
+- [Quick start](#quick-start)
+- [Output shapes](#output-shapes)
+- [Dialect detection](#dialect-detection)
+- [Library API](#library-api)
+- [License](#license)
+
+<!-- /hero -->
+
 ## Quick start
 
 ```console
