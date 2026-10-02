@@ -1,0 +1,32 @@
+{
+  "name": "csvjson",
+  "version": "0.1.0",
+  "description": "RFC 4180 CSV to JSON and back, with dialect detection and strict round-tripping. Zero dependencies.",
+  "main": "src/index.js",
+  "bin": {
+    "csvjson": "bin/csvjson.js"
+  },
+  "scripts": {
+    "test": "node --test",
+    "verify:readme": "bash scripts/verify-readme.sh"
+  },
+  "keywords": [
+    "csv",
+    "json",
+    "rfc4180",
+    "ndjson",
+    "parser",
+    "zero-dependency"
+  ],
+  "license": "MIT",
+  "author": "Xwalims",
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ]
+}
