@@ -7,13 +7,24 @@ The point of this library is the round trip. A CSV file goes in, a JSON file
 comes out, and converting back gives you **the same bytes you started with** —
 embedded newlines, embedded delimiters, `""` escapes and all.
 
+This package is **not published to npm** — there is an unrelated project of that
+name already published there. Install it from a checkout:
+
+```console
+$ git clone https://github.com/Xwalims/csvjson.git
+$ cd csvjson
+$ node bin/csvjson.js --help
 ```
-$ npm install -g csvjson
+
+Or link it onto your `PATH`:
+
+```console
+$ npm link          # provides the `csvjson` command
 ```
 
 <!-- hero -->
 
-[![CI](https://github.com/csvjson/actions/workflows/ci.yml/badge.svg)](https://github.com/csvjson/actions/workflows/ci.yml)
+[![CI](https://github.com/Xwalims/csvjson/actions/workflows/ci.yml/badge.svg)](https://github.com/Xwalims/csvjson/actions/workflows/ci.yml)
 ![node 20+](https://img.shields.io/badge/node-20+-brightgreen)
 ![MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 ![dependencies](https://img.shields.io/badge/dependencies-none-2f6f4f)
