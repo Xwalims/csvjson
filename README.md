@@ -7,6 +7,13 @@ The point of this library is the round trip. A CSV file goes in, a JSON file
 comes out, and converting back gives you **the same bytes you started with** —
 embedded newlines, embedded delimiters, `""` escapes and all.
 
+> **One known exception:** a header cell that is a plain non-negative integer —
+> `1`, `42`, `0` — does not survive the round trip. JSON objects have no
+> guaranteed key order and JavaScript hoists array-index-like keys to the front,
+> so `b,1,a` comes back as `1,b,a`. The values are right; the column order is
+> not. If your headers might be numeric, read with `--columns`, or name the
+> columns. See [Numeric headers](#numeric-headers-break-the-round-trip).
+
 This package is **not published to npm** — there is an unrelated project of that
 name already published there. Install it from a checkout:
 
@@ -33,6 +40,7 @@ $ npm link          # provides the `csvjson` command
 
 - [Quick start](#quick-start)
 - [Output shapes](#output-shapes)
+- [Numeric headers break the round trip](#numeric-headers-break-the-round-trip)
 - [Dialect detection](#dialect-detection)
 - [Library API](#library-api)
 - [License](#license)
@@ -130,6 +138,43 @@ $ csvjson to-json t.csv --transpose
   }
 ]
 ```
+
+Transposing twice really does return the original table, and the two ways to
+get there agree:
+
+```console
+$ csvjson to-json t.csv --columns --compact | csvjson to-csv - --transpose
+name,w,g
+qty,1,2
+```
+
+## Numeric headers break the round trip
+
+A header cell that is a plain non-negative integer does not come back in place.
+JSON objects carry no guaranteed key order, and JavaScript moves keys that look
+like array indices to the front of the object, so the column order changes:
+
+```console
+$ printf 'b,1,a\nx,2,y\n' > k.csv
+$ csvjson to-json k.csv --compact
+[{"1":2,"b":"x","a":"y"}]
+
+$ csvjson to-csv - <<< '[{"1":2,"b":"x","a":"y"}]'
+1,b,a
+2,x,y
+```
+
+`b,1,a` became `1,b,a`. Every value survived; only the order did not. This is
+inherent to representing a table as a JSON object of strings, and it applies
+equally to `--ndjson` and `--columns`, because all three build the object the
+same way.
+
+`--no-header` is not affected, though not by design: it invents the keys `0`,
+`1`, `2`, and the same hoisting rule sorts integer-like keys numerically, so
+they land back in the original order.
+
+Workaround: keep the original header row alongside the data, or name your
+columns, so nothing depends on a numeric header surviving.
 
 ## Dialect detection
 

@@ -272,7 +272,65 @@ test('cli: to-csv --transpose on a {columns, rows} document swaps them', () => {
   const r = run(['to-csv', '-', '--transpose'],
     '{"columns":{"a":[1,2],"b":["x","y"]},"rows":2}');
   assert.strictEqual(r.status, EXIT_OK, r.stderr);
-  assert.strictEqual(r.stdout, 'a,b\n1,2\nx,y\n');
+  // The document is the table  a,b / 1,x / 2,y.  Transposing that matrix gives
+  // a,[1,2]  and  b,[x,y]  — one output ROW per original COLUMN:
+  //   a,1,2
+  //   b,x,y
+  assert.strictEqual(r.stdout, 'a,1,2\nb,x,y\n');
+});
+
+test('cli: to-csv --transpose matches to-json --transpose on a non-square table', () => {
+  // The two documented routes to a transposed table must agree. On a table
+  // that is not square the old loop walked `data.rows` — a ROW COUNT — and so
+  // built one output column per data row instead of one per original column,
+  // naming records with names[i] and turning the first column into undefined
+  // once i passed names.length. Result: two empty trailing columns and a
+  // disagreeing header. On a 2x2 table those two mistakes cancelled, which is
+  // why the old test above passed while asserting the identity.
+  //
+  // Headers stay non-numeric on purpose: the `objects` JSON shape is built from
+  // a JS object, and keys like "1" are hoisted to the front of it, which
+  // reorders columns independently of --transpose.
+  const csv = 'name,qty\nw,1\ng,2\nx,3\n';
+  const viaJson = run(['to-json', '-', '--transpose', '--compact'], csv);
+  assert.strictEqual(viaJson.status, EXIT_OK, viaJson.stderr);
+  const expected = run(['to-csv', '-'], viaJson.stdout);
+  assert.strictEqual(expected.status, EXIT_OK, expected.stderr);
+
+  const viaColumns = run(['to-json', '-', '--columns', '--compact'], csv);
+  const got = run(['to-csv', '-', '--transpose'], viaColumns.stdout);
+  assert.strictEqual(got.status, EXIT_OK, got.stderr);
+  assert.strictEqual(got.stdout, expected.stdout,
+    'to-json --transpose and to-json --columns | to-csv --transpose must agree');
+});
+
+test('cli: to-csv --transpose is an involution on the --columns shape', () => {
+  // `rows` is only a hint about the height; the column arrays are the
+  // authority. A count that lies must not invent empty records.
+  const csv = 'name,qty\nw,1\ng,2\nx,3\n';
+  const cols = run(['to-json', '-', '--columns', '--compact'], csv);
+  const once = run(['to-csv', '-', '--transpose'], cols.stdout);
+  assert.strictEqual(once.status, EXIT_OK, once.stderr);
+
+  const colsOfOnce = run(['to-json', '-', '--columns', '--compact'], once.stdout);
+  const back = run(['to-csv', '-', '--transpose'], colsOfOnce.stdout);
+  assert.strictEqual(back.status, EXIT_OK, back.stderr);
+  assert.strictEqual(back.stdout, csv, 'transpose twice returns the original table');
+});
+
+test('cli: to-csv --transpose does not let a rows count invent columns', () => {
+  // The bug this pins down walked `data.rows` as the loop bound, so a count
+  // larger than the real height produced one output column per phantom row —
+  // the 2x2 case below grew from 2 rows to 99. The count is a hint about the
+  // height; the column arrays are the authority.
+  const r = run(['to-csv', '-', '--transpose'],
+    '{"columns":{"a":[1,2],"b":["x","y"]},"rows":99}');
+  assert.strictEqual(r.status, EXIT_OK, r.stderr);
+  const lines = r.stdout.trimEnd().split('\n');
+  assert.strictEqual(lines.length, 2,
+    'a rows count above the real height must not add output rows');
+  assert.strictEqual(lines[0], 'a,1,2');
+  assert.strictEqual(lines[1], 'b,x,y');
 });
 
 test('cli: to-csv --stats reports the record count on stderr', () => {

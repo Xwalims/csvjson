@@ -9,6 +9,12 @@ bad(){ printf '  FAIL %s\n     got: %s\n' "$1" "$2"; fail=1; }
 eq(){ if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "$(printf '%s' "$2" | head -20)"; fi; }
 
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
+# Guard for the guard: eq() must be able to fail, or "ALL README EXAMPLES
+# VERIFIED" is printed no matter what the tool does. Prove it once, loudly.
+if eq "__selfcheck" "$(printf 'x')" "y"; then
+  echo "eq() cannot fail — every check below would be vacuous" >&2
+  exit 1
+fi
 printf 'name,qty,note\nwidget,3,"has, comma"\ngadget,5,"line1\nline2"\n' > "$D/report.csv"
 printf 'a;b;c\n1;2;3\n' > "$D/s.csv"
 printf 'name,qty\nw,1\ng,2\n' > "$D/t.csv"
@@ -75,6 +81,27 @@ eq "transpose" "$($BIN to-json "$D/t.csv" --transpose)" '[
     "g": 2
   }
 ]'
+
+# The README claims transposing twice returns the original table, and shows the
+# --columns route. Both were broken together until the CLI delegate to
+# transposeTable(); keep them verified here.
+$BIN to-json "$D/t.csv" --columns --compact -o "$D/tc.json"
+eq "transpose via --columns" "$($BIN to-csv "$D/tc.json" --transpose)" 'name,w,g
+qty,1,2'
+$BIN to-csv "$D/tc.json" --transpose -o "$D/once.csv"
+$BIN to-json "$D/once.csv" --columns --compact -o "$D/once.json"
+eq "transpose is an involution" "$($BIN to-csv "$D/once.json" --transpose)" 'name,qty
+w,1
+g,2'
+
+# Numeric headers: JS hoists array-index-like keys, so the column order changes.
+printf 'b,1,a\nx,2,y\n' > "$D/k.csv"
+eq "numeric header key order" "$($BIN to-json "$D/k.csv" --compact)" '[{"1":2,"b":"x","a":"y"}]'
+printf '%s' '[{"1":2,"b":"x","a":"y"}]' > "$D/k.json"
+eq "numeric header round trip reorders" "$($BIN to-csv "$D/k.json")" '1,b,a
+2,x,y'
+# --no-header invents 0,1,2 and the same numeric key order puts them back.
+eq "no-header is unaffected" "$($BIN to-json "$D/k.csv" --no-header --compact)" '[{"0":"b","1":1,"2":"a"},{"0":"x","1":2,"2":"y"}]'
 
 got=$(node -e "
 const csvjson=require('./src/index.js');

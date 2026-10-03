@@ -17,7 +17,7 @@ const fs = require('fs');
 const { DEFAULTS, CsvError, EXIT_DATA_ERROR } = require('./tokenize.js');
 const { parseCsv, RAGGED_MODES } = require('./parse.js');
 const { TYPES } = require('./infer.js');
-const { toJson, fromJson, SHAPES } = require('./stringify.js');
+const { toJson, fromJson, SHAPES, columnsToRows, transposeTable } = require('./stringify.js');
 
 const EXIT_OK = 0;
 const EXIT_USAGE = 2;
@@ -247,12 +247,31 @@ function cmdToCsv(ctx) {
     return fail(`input is not valid JSON: ${err.message}`, EXIT_USAGE);
   }
   if (options.transpose && data && !Array.isArray(data) && data.columns) {
-    const swapped = { columns: {}, rows: data.rows };
+    // Rebuild a real table and hand it to the same transposeTable() that
+    // `to-json --transpose` uses, so the two documented routes cannot drift.
+    //
+    // The old loop walked `data.rows`, which in the {columns, rows} shape is a
+    // ROW COUNT and not a record count, and named each output record with
+    // `names[i]`. So it built one output column per data row rather than one
+    // per original column, and past names.length the first column silently
+    // became undefined. On a square table those two mistakes cancelled and the
+    // input came back unchanged; on anything non-square it emitted empty
+    // trailing columns and disagreed with `to-json --transpose`.
+    //
+    // `rows` is a row COUNT and only a hint. `to-json --columns` always writes
+    // the true height, but a hand-written document can lie about it, and the old
+    // loop used the lie as its bound — the 2x2 case grew to 99 output rows.
+    // Honouring a larger lie would pad with phantom empty columns, so take the
+    // height from the column arrays themselves, which are the authority.
     const names = Object.keys(data.columns);
-    for (let i = 0; i < data.rows; i += 1) {
-      swapped.columns[names[i] === undefined ? '' : names[i]] = names.map((n) => data.columns[n][i]);
-    }
-    data = swapped;
+    const height = names.reduce((m, n) => Math.max(m, data.columns[n].length), 0);
+    const table = transposeTable({
+      header: options.header === false ? null : names,
+      rows: columnsToRows(data.columns, height),
+    });
+    // fromJson writes element 0 as the header record, which is exactly the
+    // shape transposeTable returns.
+    data = table.header ? [table.header, ...table.rows] : table.rows;
   }
   const text = fromJson(data, options);
   writeOutput(output, text);

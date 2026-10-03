@@ -76,6 +76,16 @@ function mentions(text, flag) {
   return re.test(text);
 }
 
+/** Run the real bin with args and stdin, returning status/stdout/stderr. */
+function run(args, input) {
+  const res = spawnSync(process.execPath, [BIN, ...args], {
+    input,
+    encoding: 'utf8',
+    cwd: ROOT,
+  });
+  return { status: res.status, stdout: res.stdout, stderr: res.stderr };
+}
+
 test('flag contract: the parser source yields a non-empty flag set', () => {
   // Guard for the guard: a regex that silently matches nothing makes every
   // other assertion in this file vacuous.
@@ -152,5 +162,60 @@ test('flag contract: the README option table lists the same valued flags', () =>
   for (const flag of VALUED) {
     if (flag.startsWith('-') && !flag.startsWith('--')) continue; // short aliases are grouped
     assert.ok(table.includes(flag), `the option table omits ${flag}`);
+  }
+});
+
+test('flag contract: the transposing routes agree with each other', () => {
+  // Direction 5: route A -> route B. --transpose is reachable two ways, and
+  // the README documents it as "an involution", but nothing checked that the
+  // two ways computed the same thing. They did not: `to-csv --transpose`
+  // rebuilt the table by hand and walked `data.rows` (a row COUNT) where it
+  // needed the column names, so on any non-square table it emitted empty
+  // columns and disagreed with `to-json --transpose` on the same file.
+  //
+  // A flag being documented is not a claim about what it computes, so the
+  // cross-check has to compare the two routes against each other.
+  //
+  // Only non-numeric headers appear here. A header cell that looks like an
+  // array index ("1", "2") is hoisted to the front of the JS object that the
+  // `objects` JSON shape is built from, which reorders the columns and breaks
+  // the round trip on its own — a separate defect, tracked separately, and not
+  // about --transpose.
+  const tables = [
+    'name,qty\nw,1\ng,2\nx,3\n',       // tall: 3 rows, 2 columns
+    'name,qty\nw,1\ng,2\n',            // square
+    'name,qty,unit\nw,1,ea\ng,2,kg\n',  // wide: 2 rows, 3 columns
+  ];
+  for (const csv of tables) {
+    const viaToJson = run(['to-json', '-', '--transpose', '--compact'], csv);
+    assert.strictEqual(viaToJson.status, EXIT_OK, viaToJson.stderr);
+
+    // Route A: to-json --transpose, then write it back as CSV.
+    const routeA = run(['to-csv', '-'], viaToJson.stdout);
+    assert.strictEqual(routeA.status, EXIT_OK, routeA.stderr);
+
+    // Route B: to-json --columns, then transpose it on the way back.
+    const cols = run(['to-json', '-', '--columns', '--compact'], csv);
+    assert.strictEqual(cols.status, EXIT_OK, cols.stderr);
+    const routeB = run(['to-csv', '-', '--transpose'], cols.stdout);
+    assert.strictEqual(routeB.status, EXIT_OK, routeB.stderr);
+
+    assert.strictEqual(routeB.stdout, routeA.stdout,
+      `transposing routes disagree on ${JSON.stringify(csv)}`);
+  }
+});
+
+test('flag contract: transposing twice returns the original table', () => {
+  // The README states this outright, so the suite now actually holds it to it.
+  // Same non-numeric-header restriction as above.
+  for (const csv of ['name,qty\nw,1\ng,2\nx,3\n', 'name,qty\nw,1\ng,2\n']) {
+    const cols = run(['to-json', '-', '--columns', '--compact'], csv);
+    const once = run(['to-csv', '-', '--transpose'], cols.stdout);
+    assert.strictEqual(once.status, EXIT_OK, once.stderr);
+    const colsOfOnce = run(['to-json', '-', '--columns', '--compact'], once.stdout);
+    const twice = run(['to-csv', '-', '--transpose'], colsOfOnce.stdout);
+    assert.strictEqual(twice.status, EXIT_OK, twice.stderr);
+    assert.strictEqual(twice.stdout, csv,
+      `--transpose is not an involution for ${JSON.stringify(csv)}`);
   }
 });
