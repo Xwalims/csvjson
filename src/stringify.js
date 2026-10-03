@@ -227,10 +227,16 @@ function fromJson(data, options = {}) {
       const rows = data.map((obj) => names.map((n) => (obj[n] === undefined ? '' : obj[n])));
       if (opts.header === false) emit(null, rows);
       else emit(names, rows);
-    } else {
+    } else if (data.length) {
       const rows = data.map((v) => [v]);
       if (opts.header === false) emit(null, rows);
       else emit(['value'], rows);
+    } else {
+      // An empty array holds no records, so there is no column name to invent.
+      // emit() would otherwise contradict its own `if (body.length)` guard and
+      // turn "no rows" into a one-line CSV holding a fabricated header, which
+      // then round-trips back to a non-empty table.
+      return lines.join('');
     }
     return lines.join('');
   }

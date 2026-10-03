@@ -280,9 +280,13 @@ you need a snapshot before the next chunk. An unterminated quote is reported by
 
 | option | default | meaning |
 | --- | --- | --- |
+| `-h, --help` | — | print usage |
+| `-V, --version` | — | print the version |
 | `-o, --output` | stdout | output file, `-` for stdout |
-| `--delimiter` | detect | single character, or `\t` |
-| `--quote` | detect | single character |
+| `-d, --delimiter` | detect | single character, or `\t` |
+| `--delimiter` | detect | long form of `-d` |
+| `-q, --quote` | detect | single character |
+| `--quote` | detect | long form of `-q` |
 | `--no-detect` | off | skip detection, use comma + `"` |
 | `--no-header` | off | first record is data |
 | `--types` | `auto` | `auto`, `all-string`, `number`, `boolean`, `null` |
@@ -296,6 +300,14 @@ you need a snapshot before the next chunk. An unterminated quote is reported by
 | `--quote-all` | off | quote every field on write |
 | `--eol` | `lf` | `lf` or `crlf` record separator |
 | `--no-trailing-nl` | off | omit the final record separator |
+| `--` | — | end of options; everything after it is positional |
+
+A file whose name begins with `-` is otherwise read as an unknown option, so
+pass it after a bare `--`:
+
+```console
+$ csvjson -- to-json -2024-01.csv
+```
 
 ## Tests
 

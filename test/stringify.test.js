@@ -58,6 +58,19 @@ test('stringify: crlf record separator', () => {
   assert.strictEqual(stringify(['a'], [['1']], { delimiter: ',', quote: '"', eol: '\r\n' }), 'a\r\n1\r\n');
 });
 
+test('stringify: a row that is not an array is written as one field', () => {
+  // stringify() accepts any Iterable of rows, so a bare scalar row is a legal
+  // input and must not be treated as a list of cells. No CLI path reaches this
+  // branch -- rows always arrive as arrays -- so it is pinned here.
+  assert.strictEqual(stringify(['a', 'b'], [1], W), 'a,b\n1\n');
+  assert.strictEqual(stringify(['a'], ['plain', 'has,comma'], W), 'a\nplain\n"has,comma"\n');
+});
+
+test('stringify: omitting rows writes just the header record', () => {
+  assert.strictEqual(stringify(['a', 'b'], undefined, W), 'a,b\n');
+  assert.strictEqual(stringify(['a', 'b'], null, W), 'a,b\n');
+});
+
 test('stringify: toJson emits an array of objects', () => {
   const text = toJson({ header: ['a', 'b'], rows: [[1, 2]] }, { indent: 0 });
   assert.deepStrictEqual(JSON.parse(text), [{ a: 1, b: 2 }]);

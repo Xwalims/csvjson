@@ -30,10 +30,17 @@ Usage:
   csvjson --help
   csvjson --version
 
+  A bare "--" ends option parsing, so a filename that starts with "-" can be
+  passed as the input: csvjson -- to-json -weird.csv
+
 Options:
+  -h, --help              Print this usage
+  -V, --version           Print the version
   -o, --output <file>     Write to <file> ("-" means stdout, the default)
       --delimiter <char>  Field delimiter (default: detect , ; tab |)
+  -d, --delimiter <char>  Short form of --delimiter
       --quote <char>      Quote character (default: detect " ')
+  -q, --quote <char>      Short form of --quote
       --no-detect          Skip dialect detection; use the defaults
       --no-header          The first record is data, not column names
       --types <mode>      ${TYPES.join('|')} (default: auto)
@@ -177,9 +184,17 @@ function parseArgs(argv) {
     } else if (arg === '--no-trailing-nl') {
       options.trailingNewline = false;
     } else if (arg === '--') {
+      // POSIX end-of-options: every remaining argument is positional, including
+      // one that starts with '-'. The old code swallowed only the first one and
+      // discarded the rest, so `csvjson -- to-json in.csv` reported "a command
+      // is required" and a second path vanished without a word.
       const rest = argv.slice(i + 1);
-      if (rest.length && input === null) input = rest[0];
       i = argv.length;
+      for (const positional of rest) {
+        if (command === null) command = positional;
+        else if (input === null) input = positional;
+        else errors.push(`unexpected argument: ${positional}`);
+      }
     } else if (arg.charAt(0) === '-' && arg !== '-') {
       errors.push(`unknown option: ${arg}`);
     } else if (command === null) {
