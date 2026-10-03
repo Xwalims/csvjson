@@ -150,8 +150,22 @@ test('cli: exit code 2 for a third positional argument without `--`', () => {
 });
 
 test('cli: exit code 2 for an unreadable input file', (t) => {
+  // Two platforms cannot produce EACCES this way, so the test skips rather than
+  // asserting a behaviour those platforms cannot exhibit:
+  //
+  //   - root ignores file permissions entirely.
+  //   - Windows has no POSIX mode bits: chmod 000 leaves the file fully readable,
+  //     so the CLI legitimately exits 0 and the test failed on all three Windows
+  //     matrix jobs while passing on every Linux and macOS one.
+  //
+  // CI runs windows-latest, and a test that can only fail there is a broken
+  // assertion, not a stricter one.
   if (process.getuid && process.getuid() === 0) {
     t.skip('root ignores file permissions, so EACCES cannot be provoked here');
+    return;
+  }
+  if (process.platform === 'win32') {
+    t.skip('Windows has no POSIX permission bits, so EACCES cannot be provoked here');
     return;
   }
   const dir = tmpdir(t);
@@ -168,6 +182,18 @@ test('cli: exit code 2 for an unreadable input file', (t) => {
   const r = run(['to-json', locked]);
   assert.strictEqual(r.status, EXIT_USAGE);
   assert.match(r.stderr, /permission denied/);
+});
+
+test('cli: a missing input file exits 2 on every platform', (t) => {
+  // The portable half of the same contract. EACCES is not portable, but ENOENT
+  // is: a path that does not exist must be a usage error everywhere, including
+  // Windows, where the test above skips. Without this the EACCES test would be
+  // the only coverage of "unreadable input is exit 2" and it is dark on Windows.
+  const dir = tmpdir(t);
+  const missing = path.join(dir, 'does-not-exist.csv');
+  const r = run(['to-json', missing]);
+  assert.strictEqual(r.status, EXIT_USAGE, `stderr was: ${r.stderr}`);
+  assert.match(r.stderr, /no such file|ENOENT|not found/i);
 });
 
 // -------------------------------------------------------------- to-csv -----
