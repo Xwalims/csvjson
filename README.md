@@ -344,8 +344,11 @@ you need a snapshot before the next chunk. An unterminated quote is reported by
   holding exactly one quote is `"""`
 - **UTF-8 BOM** — stripped at the start of input, and only there
 - **Trailing newline** — present or absent, both handled
-- **Chunk boundaries** — a `\r\n` pair or a `""` escape split across reads is
-  still tokenized correctly
+- **Chunk boundaries** — a `\r\n` pair, a `""` escape or a multi-character
+  delimiter split across reads is still tokenized correctly, and the answer is
+  the same at every chunking
+- **Records appear when they complete** — a record is in `tz.rows` as soon as
+  its terminating byte arrives, not one read later
 - **Mixed line endings** — CRLF, LF and bare CR all terminate a record
 - **Unterminated quotes** — reported with a line and column, never silently
   swallowed

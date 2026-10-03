@@ -142,14 +142,47 @@ class Tokenizer {
     this.atStart = true;
     /** True once the record in progress has consumed anything at all. */
     this.recordTouched = false;
+    /**
+     * Tail of the last chunk that could still turn out to be the start of a
+     * delimiter. Empty unless a multi-character delimiter straddles a chunk
+     * boundary; see push().
+     */
+    this.pending = '';
+    /**
+     * Set while flush() drains `pending`. Withholding is what makes a delimiter
+     * split across reads work, but at end of input there is no next read, so the
+     * tail must be parsed as ordinary characters. Without this flag the drain
+     * below would re-withhold the very characters it is trying to release and
+     * the end of the file would be silently dropped.
+     */
+    this.draining = false;
   }
 
   /** Feed a chunk of input; returns the same array every record is appended to. */
   push(chunk) {
-    const str = String(chunk);
+    // A delimiter split across two reads must be recognised, so the withheld
+    // tail is prepended before anything is parsed. `str` is rebuilt rather than
+    // the loop being re-entered, because the tokenizer state must stay untouched
+    // across the boundary.
+    let str = String(chunk);
+    if (this.pending !== '') {
+      str = this.pending + str;
+      this.pending = '';
+    }
     const n = str.length;
     let i = 0;
     while (i < n) {
+      // A delimiter may begin here but be cut short by the end of this chunk.
+      // Nothing can be decided yet, so the rest of the chunk is withheld and
+      // re-examined with the next one. Without this a multi-character delimiter
+      // is silently missed whenever a read boundary falls inside it, and the
+      // field boundary it should have produced simply disappears from the
+      // output -- the worst kind of failure, because the data still looks valid.
+      if (this._partialDelimiter(str, i) && !this.draining) {
+        this.pending = str.slice(i);
+        break;
+      }
+
       const ch = str[i];
       // atStart describes the very first character only; capture it before the
       // first character is consumed so a BOM later in the same chunk survives.
@@ -179,15 +212,26 @@ class Tokenizer {
       }
 
       if (this.state === S.AFTER_QUOTE) {
+        // A record break outranks the delimiter here, and it has to: below, the
+        // plain UNQUOTED path checks for a record break FIRST, so keeping the
+        // delimiter check first would make the same bytes parse one way after a
+        // quoted field and the other way after a bare one. That is not a
+        // cosmetic difference -- it made `"ab"\r\nc` two records in one push and
+        // three when streamed a character at a time, with a `\r\n` delimiter.
+        //
+        // The cases that matter are a delimiter that IS a record separator
+        // (`\r\n`, `\r\r`, `\n\n`) and a delimiter beginning with `\r` or `\n`.
+        // No real dialect uses those as a delimiter, but the tokenizer must not
+        // return a chunk-dependent answer for bytes that are otherwise ordinary.
+        if (ch === '\r' || ch === '\n') {
+          i += this._endRecord(ch === '\r');
+          continue;
+        }
         if (this._isDelimiter(str, i)) {
           i += this.delimiter.length;
           this._endField();
           this.state = S.FIELD_START;
           this.column += 1;
-          continue;
-        }
-        if (ch === '\r' || ch === '\n') {
-          i += this._endRecord(ch === '\r');
           continue;
         }
         // Lenient: stray characters after a closing quote are literal data.
@@ -266,6 +310,20 @@ class Tokenizer {
 
   /** Signal end of input. Throws UnterminatedQuoteError on an open quote. */
   flush() {
+    // Anything still withheld from the last push() is real data, not a partial
+    // delimiter: no more input is coming, so the tail cannot turn into a match
+    // and must be parsed as ordinary characters. Dropping it would lose the end
+    // of the file -- a record ending in a lone ':' would vanish silently.
+    if (this.pending !== '') {
+      const held = this.pending;
+      this.pending = '';
+      this.draining = true;
+      try {
+        this.push(held);
+      } finally {
+        this.draining = false;
+      }
+    }
     if (this.state === S.QUOTED) {
       throw new UnterminatedQuoteError({
         line: this.quoteLine,
@@ -290,6 +348,35 @@ class Tokenizer {
     const d = this.delimiter;
     if (d.length === 1) return str.charCodeAt(i) === d.charCodeAt(0);
     return str.startsWith(d, i);
+  }
+
+  /**
+   * True when the text from `i` is a strict, incomplete prefix of the
+   * delimiter -- i.e. the chunk ends in the first half of a multi-character
+   * delimiter, so the match cannot be decided until more input arrives.
+   *
+   * Only consulted outside a quoted field: inside quotes a delimiter is ordinary
+   * data, and there is nothing to decide. For a single-character delimiter this
+   * is always false, so the common path is unaffected.
+   *
+   * A record break always outranks the delimiter. A lone `\r` at the end of a
+   * chunk terminates the record no matter what follows it -- the `skipLF` flag
+   * exists precisely so the LF half of a CRLF is swallowed as part of that same
+   * break. So withholding a trailing `\r` because it might begin a `\r\n`
+   * DELIMITER would make the same bytes parse as one record one way and two the
+   * other. `\r\n` is not a sensible delimiter anyway (it is the record
+   * separator), but the tokenizer must not corrupt data because of it.
+   */
+  _partialDelimiter(str, i) {
+    const d = this.delimiter;
+    if (d.length === 1) return false;
+    if (this.state === S.QUOTED || this.state === S.QUOTE_IN_QUOTED) return false;
+    if (str.charCodeAt(i) === 0x0d /* \r */ || str.charCodeAt(i) === 0x0a /* \n */) {
+      return false;
+    }
+    const rest = str.length - i;
+    if (rest >= d.length) return false;
+    return d.startsWith(str.slice(i));
   }
 
   _nextLine() {
