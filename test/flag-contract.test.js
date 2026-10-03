@@ -61,24 +61,52 @@ function probe(flag) {
   return `${res.stderr}\n${res.stdout}`;
 }
 
+/**
+ * Is `flag` present in `text` as a WHOLE token?
+ *
+ * A plain substring test is vacuous for short flags: help contains `--delimiter`,
+ * so `help.includes('-d')` is true whether or not `-d` was ever documented, and
+ * the same trap holds for -q inside --quote, -h inside --help, -o inside
+ * --output. The lookarounds reject a longer dash run and a longer word, so only
+ * a real occurrence counts.
+ */
+function mentions(text, flag) {
+  const escaped = flag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`(?<![\\w-])${escaped}(?![\\w-])`);
+  return re.test(text);
+}
+
 test('flag contract: the parser source yields a non-empty flag set', () => {
   // Guard for the guard: a regex that silently matches nothing makes every
   // other assertion in this file vacuous.
   const flags = sourceFlags();
   assert.ok(flags.length >= 20, `only found ${flags.length}: ${flags.join(' ')}`);
   assert.ok(flags.includes('--transpose'));
-  assert.ok(flags.includes('--no-trailing-nl'));
+  assert.ok(flags.includes('-d'), 'the short delimiter alias must be in the oracle');
+  assert.ok(flags.includes('-V'));
+});
+
+test('flag contract: mentions() is not fooled by a substring', () => {
+  // The guard for the guard: without this, `mentions('--delimiter', '-d')`
+  // passing would prove nothing.
+  assert.strictEqual(mentions('--delimiter <char>', '-d'), false);
+  assert.strictEqual(mentions('--delimiter <char>', '--delimiter'), true);
+  assert.strictEqual(mentions('-d, --delimiter <char>', '-d'), true);
+  assert.strictEqual(mentions('--quote <char>', '-q'), false);
+  assert.strictEqual(mentions('--no-color', '--color'), false);
+  assert.strictEqual(mentions('trailing-dash-', '-'), false);
+  assert.strictEqual(mentions('a -- b', '--'), true);
 });
 
 test('flag contract: every flag the parser accepts appears in --help', () => {
   const help = helpText();
-  const hidden = sourceFlags().filter((f) => !help.includes(f));
+  const hidden = sourceFlags().filter((f) => !mentions(help, f));
   assert.deepStrictEqual(hidden, [], `undocumented in --help: ${hidden.join(' ')}`);
 });
 
 test('flag contract: every flag the parser accepts appears in the README', () => {
   const doc = readme();
-  const missing = sourceFlags().filter((f) => !doc.includes(f));
+  const missing = sourceFlags().filter((f) => !mentions(doc, f));
   assert.deepStrictEqual(missing, [], `undocumented in README: ${missing.join(' ')}`);
 });
 
