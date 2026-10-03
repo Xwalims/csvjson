@@ -140,6 +140,8 @@ class Tokenizer {
     this.quoteRowIndex = null;
     /** True until the first input character has been seen (BOM guard). */
     this.atStart = true;
+    /** True once the record in progress has consumed anything at all. */
+    this.recordTouched = false;
   }
 
   /** Feed a chunk of input; returns the same array every record is appended to. */
@@ -239,6 +241,9 @@ class Tokenizer {
           continue;
         }
         if (ch === this.quote) {
+          // An opening quote means the record holds a FIELD even when that field
+          // is empty: `""` is one empty cell, not an empty line.
+          this.recordTouched = true;
           this.state = S.QUOTED;
           this.insideCR = false;
           this.quoteLine = this.line;
@@ -249,6 +254,9 @@ class Tokenizer {
         }
       }
       this.state = S.UNQUOTED;
+      // Literal data is the common case and must count as content: a record
+      // like `1;2` holds a field even though no delimiter ever appears in it.
+      this.recordTouched = true;
       this.field.push(ch);
       this.column += 1;
       i += 1;
@@ -290,6 +298,9 @@ class Tokenizer {
   }
 
   _endField() {
+    // A completed field means the record has content, even if that field is
+    // the empty string (a bare empty cell or a quoted `""`).
+    this.recordTouched = true;
     const f = this.field;
     this.field = [];
     this.row.push(f.length === 1 ? f[0] : f.join(''));
@@ -297,13 +308,21 @@ class Tokenizer {
 
   /** Close the current record; returns the input chars it consumed. */
   _endRecord(sawCR) {
+    // A record is blank when the line held nothing at all: no delimiter, no
+    // data, no quotes. It must be told apart from a record of one empty field
+    // (`""` or an empty cell), because only the first is an empty LINE. Once
+    // the record is a plain string[] that distinction is gone for good, so it
+    // is captured here where the input is still being read.
+    const blank = !this.recordTouched;
     this._endField();
     const fields = this.row;
     this.row = [];
     const rowIndex = this.rowIndex;
     const line = this.rowStartLine;
     this.rowIndex += 1;
-    this.rows.push(this.positions ? { fields, line, rowIndex } : fields);
+    this.rows.push(
+      this.positions ? { fields, line, rowIndex, blank } : fields
+    );
     // A record break consumes exactly one line: a bare CR ends the line here and
     // the LF of a CRLF pair is swallowed by skipLF without counting again.
     // Column restarts at 1 so positions stay relative to the record start.
@@ -312,6 +331,7 @@ class Tokenizer {
     this.rowStartLine = this.line;
     this.state = S.FIELD_START;
     this.insideCR = false;
+    this.recordTouched = false;
     // Outside quotes a CRLF is one record break; the LF must be swallowed.
     this.skipLF = sawCR;
     return 1;

@@ -7,12 +7,18 @@ The point of this library is the round trip. A CSV file goes in, a JSON file
 comes out, and converting back gives you **the same bytes you started with** —
 embedded newlines, embedded delimiters, `""` escapes and all.
 
-> **One known exception:** a header cell that is a plain non-negative integer —
-> `1`, `42`, `0` — does not survive the round trip. JSON objects have no
-> guaranteed key order and JavaScript hoists array-index-like keys to the front,
-> so `b,1,a` comes back as `1,b,a`. The values are right; the column order is
-> not. If your headers might be numeric, read with `--columns`, or name the
-> columns. See [Numeric headers](#numeric-headers-break-the-round-trip).
+> **Two known exceptions**, both because JSON cannot express what the CSV file
+> held:
+>
+> 1. A header cell that is a plain non-negative integer — `1`, `42`, `0` — does
+>    not survive the round trip. JSON objects have no guaranteed key order and
+>    JavaScript hoists array-index-like keys to the front, so `b,1,a` comes back
+>    as `1,b,a`. The values are right; the column order is not. If your headers
+>    might be numeric, read with `--columns`, or name the columns. See
+>    [Numeric headers](#numeric-headers-break-the-round-trip).
+> 2. A blank line does not survive the JSON hop: it returns as a row of nulls.
+>    The table API keeps it exactly. See
+>    [Ragged rows](#ragged-rows).
 
 This package is **not published to npm** — there is an unrelated project of that
 name already published there. Install it from a checkout:
@@ -229,6 +235,29 @@ Rows whose width disagrees with the header are reconciled by `--ragged`:
 | `pad` (default) | fill missing trailing cells with `--pad-value`; truncate overflow |
 | `error` | throw on the first width mismatch |
 | `dump` | move overflow into an array cell in the last column |
+
+A blank line is not a ragged row. It is an empty line, and `--ragged` never
+touches it: padding it would invent cells the file did not contain, and the
+writer would emit a delimiter for each one. The row survives the round trip as
+an empty line.
+
+> An empty line cannot cross the JSON boundary. Every JSON shape has to name
+> its cells, so a blank line comes back out as a row of nulls — and `{"a":null,
+> "b":null}` is indistinguishable from a row that really did hold nulls, which
+> the writer turns back into `,`:
+>
+> ```console
+> $ printf 'a,b\n1,2\n\n3,4\n' > g2.csv
+> $ csvjson to-json g2.csv --compact
+> [{"a":1,"b":2},{"a":null,"b":null},{"a":3,"b":4}]
+> $ csvjson to-csv g2.json          # -> a,b / 1,2 / , / 3,4
+> ```
+>
+> Blank lines round-trip losslessly through the table API
+> (`parseCsv` → `stringify`), which is what keeps them out of the `--ragged`
+> business in the first place. Note that `a,b\n,\n` is a different file: the
+> comma makes it a row of two empty cells, which *is* padded and *is* reported
+> as ragged.
 
 ```console
 $ printf 'a,b,c\n1,2\n1,2,3,4\n' > g.csv

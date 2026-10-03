@@ -158,6 +158,11 @@ function inferRows(rows, columnCount, options = {}) {
   const columns = [];
   for (let c = 0; c < columnCount; c += 1) columns.push([]);
   for (const row of rows) {
+    // A zero-field row is a blank LINE, not a row of empty cells: it has no
+    // columns to infer. Widening it here would turn an empty line back into
+    // empty cells, and the writer would then emit a delimiter for each one it
+    // invented. Such rows are carried through untouched.
+    if (row.length === 0) continue;
     for (let c = 0; c < columnCount; c += 1) {
       columns[c].push(c < row.length ? row[c] : '');
     }
@@ -165,6 +170,7 @@ function inferRows(rows, columnCount, options = {}) {
 
   const types = columns.map((cells) => inferColumn(cells, opts));
   const coerced = rows.map((row) => {
+    if (row.length === 0) return [];
     const out = new Array(columnCount);
     for (let c = 0; c < columnCount; c += 1) {
       out[c] = coerce(c < row.length ? row[c] : '', types[c], { force });

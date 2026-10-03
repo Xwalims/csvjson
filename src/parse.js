@@ -230,14 +230,37 @@ function parseCsv(input, options = {}) {
     ? header.length
     : body.reduce((m, r) => Math.max(m, r.fields.length), 0);
 
+  // A blank line is not a short row. It is an empty LINE, and it must not be
+  // padded: padding invents cells that were never in the file and the writer
+  // then emits a stray delimiter for each one, so `\n\n` comes back as `\n,\n`.
+  // Blank records are therefore held out of the ragged machinery — which would
+  // both pad them and count them as malformed — and re-inserted in place as
+  // zero-field rows, which the writer renders as an empty line. `[]` is exactly
+  // what a blank record means, so the cycle closes.
+  const kept = [];
+  const blanks = new Set();
+  body.forEach((rec, i) => {
+    if (rec.blank) blanks.add(i);
+    else kept.push(rec);
+  });
+  const keptRows = applyRagged(kept, expectedWidth, opts);
+
   const ragged = [];
-  const reconciled = applyRagged(body, expectedWidth, opts).map((fields, i) => {
-    const rec = records[(opts.header !== false ? 1 : 0) + i];
+  const reconciled = [];
+  let k = 0;
+  for (let i = 0; i < body.length; i += 1) {
+    if (blanks.has(i)) {
+      reconciled.push([]);
+      continue;
+    }
+    const rec = kept[k];
+    const fields = keptRows[k];
+    k += 1;
     if (rec && rec.fields.length !== fields.length) {
       ragged.push({ rowIndex: rec.rowIndex, line: rec.line, width: rec.fields.length });
     }
-    return fields;
-  });
+    reconciled.push(fields);
+  }
 
   const { types, rows } = inferRows(reconciled, expectedWidth, opts);
 
