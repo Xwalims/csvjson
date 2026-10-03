@@ -10,11 +10,14 @@ eq(){ if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "$(printf '%s' "$2" | head
 
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
 # Guard for the guard: eq() must be able to fail, or "ALL README EXAMPLES
-# VERIFIED" is printed no matter what the tool does. Prove it once, loudly.
-if eq "__selfcheck" "$(printf 'x')" "y"; then
+# VERIFIED" would print no matter what the tool did. Deliberately mismatch and
+# require eq() to report it; if eq() ever passes a bad comparison, bail out.
+eq "__selfcheck (expected to FAIL)" "$(printf 'x')" "y"
+if [ "$fail" -eq 0 ]; then
   echo "eq() cannot fail — every check below would be vacuous" >&2
   exit 1
 fi
+fail=0
 printf 'name,qty,note\nwidget,3,"has, comma"\ngadget,5,"line1\nline2"\n' > "$D/report.csv"
 printf 'a;b;c\n1;2;3\n' > "$D/s.csv"
 printf 'name,qty\nw,1\ng,2\n' > "$D/t.csv"
