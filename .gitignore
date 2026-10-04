@@ -5,3 +5,11 @@ npm-debug.log*
 coverage/
 .nyc_output/
 *.csv.tmp
+
+# Python bytecode. The scripts/*.py files are development-only oracles and are
+# never imported by the package -- scripts/ is not in package.json "files", so
+# nothing there reaches npm -- but importing one from a REPL or a harness leaves
+# a __pycache__ behind that must not be committed.
+__pycache__/
+*.pyc
+*.pyo

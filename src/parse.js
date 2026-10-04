@@ -21,16 +21,31 @@ const { inferRows, TYPES } = require('./infer.js');
 const RAGGED_MODES = Object.freeze(['pad', 'error', 'dump']);
 
 /**
- * Scan a sample and count candidate delimiters per record, ignoring anything
- * inside a quoted field. Returns a per-candidate tally of
- * {rows: [{count, consistent}], total}.
+ * Scan a sample under ONE quote character and count candidate delimiters per
+ * record, ignoring anything inside a quoted field.
+ *
+ * The walk follows the tokenizer's own rule exactly: a quote character opens a
+ * quoted region only at the START of a field (the first character of the input,
+ * or right after a delimiter or a record break). A quote in the middle of a
+ * field is literal data.
+ *
+ * With the quote character fixed there is nothing to guess, which is what makes
+ * this safe. The earlier version tried to infer it as it went and let a single
+ * unclosed opener swallow the rest of the file, so a tab- or semicolon-separated
+ * file whose first field merely BEGINS with the other quote character was read
+ * as single-column and fell back to ','. `detectDelimiter` now scores the whole
+ * scan under each candidate instead, so no guess is made mid-walk.
+ *
+ * Returns the per-candidate tally plus `unterminated`: true when the sample ends
+ * inside a quoted region, i.e. the file is not valid CSV under this quote
+ * character and the tally must not be trusted.
  */
-function sniff(sample, quoteCandidates) {
+function sniff(sample, quoteChar = '"') {
   const stats = new Map();
   for (const d of DELIMITER_CANDIDATES) stats.set(d, []);
   let recordCounts = new Map(); // delimiter -> counts for the current record
   let inQuotes = false;
-  let quote = '"';
+  const quote = quoteChar;
 
   for (let i = 0; i < sample.length; i += 1) {
     const ch = sample[i];
@@ -42,11 +57,10 @@ function sniff(sample, quoteCandidates) {
       continue;
     }
     // Not inside quotes: only a quote at a field start opens a quoted region.
-    if (ch === '"' || ch === "'") {
+    if (ch === quote) {
       const prev = i > 0 ? sample[i - 1] : null;
       if (prev === null || DELIMITER_CANDIDATES.indexOf(prev) !== -1 || prev === '\n' || prev === '\r') {
         inQuotes = true;
-        quote = ch;
       }
       continue;
     }
@@ -62,41 +76,68 @@ function sniff(sample, quoteCandidates) {
       if (ch === d) recordCounts.set(d, (recordCounts.get(d) || 0) + 1);
     }
   }
-  // The trailing partial record counts as a sample row too.
-  for (const d of DELIMITER_CANDIDATES) {
-    if (recordCounts.has(d)) stats.get(d).push(recordCounts.get(d));
+  // A scan that ends mid-field tells you the quote character is the wrong one,
+  // so its counts describe a file that is not CSV under this assumption.
+  if (!inQuotes) {
+    // The trailing partial record counts as a sample row too.
+    for (const d of DELIMITER_CANDIDATES) {
+      if (recordCounts.has(d)) stats.get(d).push(recordCounts.get(d));
+    }
   }
-  void quoteCandidates;
-  return stats;
+  return { stats, unterminated: inQuotes };
 }
 
 /**
  * Choose a delimiter by scoring each candidate on the sample.
  * Prefers the candidate with the highest count that is consistent across rows;
  * ties break by candidate order (comma first).
+ *
+ * Detection is a PIPELINE, and the order matters: the quote character is chosen
+ * first (detectQuote), and the delimiter is then scored under that quote
+ * character only. Scanning under both and keeping the best score is wrong --
+ * a reading in which the quote character never opens anything loses the very
+ * protection quoted fields exist to provide, so plain commas inside a quoted
+ * field get counted and can outscore the real delimiter.
+ *
+ * If the sample ends inside a quoted region, the quote character is wrong: it
+ * stranded an opener and every delimiter after it is invisible. The other
+ * candidate is then tried, and if neither terminates the sample simply has no
+ * usable reading. That is exactly the failure that made a semicolon-separated
+ * file beginning with a lone double quote come back as single-column and fall
+ * back to ','. Trying one alternative is a linear cost; a guess made mid-scan
+ * would need look-ahead to undo itself, which is quadratic in the sample size.
  */
-function detectDelimiter(sample) {
-  const stats = sniff(sample);
+function detectDelimiter(sample, quoteChar) {
+  const first = typeof quoteChar === 'string' && quoteChar.length ? quoteChar : detectQuote(sample);
+  const order = [first].concat(QUOTE_CANDIDATES.filter((q) => q !== first));
   let best = null;
-  for (const d of DELIMITER_CANDIDATES) {
-    const counts = stats.get(d);
-    if (!counts.length) continue;
-    const total = counts.reduce((a, b) => a + b, 0);
-    if (total === 0) continue;
-    // Consistency: how many records share the modal width.
-    const freq = new Map();
-    for (const c of counts) freq.set(c, (freq.get(c) || 0) + 1);
-    let modal = 0;
-    let modalCount = 0;
-    for (const [width, n] of freq) {
-      if (n > modalCount || (n === modalCount && width > modal)) {
-        modal = width;
-        modalCount = n;
+  for (const quote of order) {
+    const { stats, unterminated } = sniff(sample, quote);
+    if (unterminated) continue; // not a CSV file under this quote character
+    for (const d of DELIMITER_CANDIDATES) {
+      const counts = stats.get(d);
+      if (!counts.length) continue;
+      const total = counts.reduce((a, b) => a + b, 0);
+      if (total === 0) continue;
+      // Consistency: how many records share the modal width.
+      const freq = new Map();
+      for (const c of counts) freq.set(c, (freq.get(c) || 0) + 1);
+      let modal = 0;
+      let modalCount = 0;
+      for (const [width, n] of freq) {
+        if (n > modalCount || (n === modalCount && width > modal)) {
+          modal = width;
+          modalCount = n;
+        }
       }
+      const modalTotal = modal * modalCount;
+      const score = modalTotal + (modal / counts.length) * 0.5;
+      if (!best || score > best.score) best = { delimiter: d, score, width: modal, records: counts.length };
     }
-    const modalTotal = modal * modalCount;
-    const score = modalTotal + (modal / counts.length) * 0.5;
-    if (!best || score > best.score) best = { delimiter: d, score, width: modal, records: counts.length };
+    // The first quote character that yields a whole-file reading wins outright.
+    // Its reading is the one the parser will actually use, so letting a rival
+    // outscore it would optimise against the wrong parse.
+    if (best) break;
   }
   return best ? best.delimiter : ',';
 }
@@ -196,8 +237,10 @@ function parseCsv(input, options = {}) {
     delimiter = opts.delimiter || ',';
     quote = opts.quote || '"';
   } else {
-    delimiter = opts.delimiter || detectDelimiter(sample);
+    // Quote first, then delimiter: the delimiter is scored under the quote
+    // character the parse will really use. See detectDelimiter.
     quote = opts.quote || detectQuote(sample);
+    delimiter = opts.delimiter || detectDelimiter(sample, quote);
   }
 
   const tok = new Tokenizer(Object.assign({}, opts, { delimiter, quote, positions: true }));

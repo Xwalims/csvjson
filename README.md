@@ -262,6 +262,24 @@ Candidates are `,` `;` tab and `|`, with `"` and `'` for quoting. Override them
 with `--delimiter` / `--quote`, or bypass detection entirely with `--no-detect`
 (which assumes comma + `"`).
 
+Detection runs as a pipeline: the quote character is chosen first, and the
+delimiter is then scored under that quote character only. A reading in which the
+sample ends inside a quoted field is rejected outright, because such a sample is
+not CSV under that assumption — every delimiter after the stranded opening quote
+would be invisible, and scoring it highest is how a tab-separated file used to be
+reported as a single column. Trying the other quote character is a linear cost; a
+guess made mid-scan would need look-ahead to undo itself, which is quadratic in
+the sample size.
+
+Two limits are worth stating plainly. First, detection is a heuristic: for a
+sample in which two dialects both terminate and both explain every byte, no
+algorithm can recover the writer's intent, and `csvjson` will not guess between
+them beyond its documented scoring order. Second, the guard against stranded
+quotes is a policy decision on input whose meaning the bytes do not determine —
+over every sample whose dialect *is* determined, dropping it changes nothing, and
+over random samples it changes 7.8% of answers. It is a safety net for malformed
+files, not a correctness guarantee.
+
 `--stats` prints the detected dialect and inferred types to **stderr**, leaving
 stdout clean for piping.
 
@@ -450,6 +468,23 @@ $ csvjson -- to-json -2024-01.csv
 ```console
 $ npm test
 ```
+
+The suite runs on Node alone, with no dependencies and no network. Beyond it,
+four development-only harnesses check the implementation against ground truth
+outside the repository. They need Python and are neither part of `npm test` nor of
+CI, because the published package must stay build-free:
+
+| harness | checks |
+| --- | --- |
+| `python3 scripts/crosscheck.py` | reader, writer and chunk-invariance against python's `csv` module, in both directions |
+| `python3 scripts/detect-check.py` | dialect detection against the delimiter and quote character python's `csv.writer` was told to use |
+| `bash scripts/mutation-test.sh` | that the tokenizer's mutants are caught by the suite and the cross-check |
+| `bash scripts/mutation-detection.sh` | the same, for the detector — including one mutant documented as surviving by design, with the measurement that justifies it |
+
+`crosscheck.py` covers only well-formed input, so neither harness is a total
+oracle: malformed-input rejection, type inference, the output shapes and the
+ragged policies are csvjson's own concepts with no counterpart in python's `csv`,
+and those belong to the suite. Each harness's docstring states its own gaps.
 
 ## License
 

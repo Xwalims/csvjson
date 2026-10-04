@@ -8,6 +8,7 @@ const {
   detectDelimiter,
   detectQuote,
   applyRagged,
+  sniff,
   RAGGED_MODES,
 } = require('../src/parse.js');
 const { RaggedRowError, CsvError } = require('../src/tokenize.js');
@@ -69,6 +70,85 @@ test('parse: detects double and single quotes', () => {
   assert.strictEqual(detectQuote('a,"b,c"'), '"');
   assert.strictEqual(detectQuote("a,'b,c'"), "'");
   assert.strictEqual(detectQuote('a,b,c'), '"');
+});
+
+test('parse: an unclosed quote does not hide the real delimiter', () => {
+  // Regression: the sniffer inferred the quote character as it walked, so a
+  // single unclosed opener latched "inside quotes" for the rest of the sample
+  // and every delimiter after it became invisible. Detection answered the ','
+  // fallback for files that were plainly tab- or semicolon-separated.
+  //
+  // Ground truth is python's csv.reader. On '"\t\'x\r\ny\'\t\'x\ry\'\t\r' it
+  // reports [["'", 'x\r\ny', 'x\ry', '']] -- three tab delimiters and no closing
+  // quote at all, because a '"' at the head of the first field is plain data
+  // under a dialect whose quotechar is "'".
+  assert.strictEqual(detectDelimiter('"\t\'x\r\ny\'\t\'x\ry\'\t\r'), '\t');
+  assert.strictEqual(detectDelimiter('";emoji☃\r'), ';');
+  assert.strictEqual(detectDelimiter("\r';日本;NaN;;a\r"), ';');
+
+  // The commit-to-one-reading rule, on the shortest inputs that separate it from
+  // "score every reading and keep the best". In each, detectQuote picks the quote
+  // character that strands an opener, so the '"' reading ends inside a quoted
+  // field and its tally is empty; the other reading terminates and sees the real
+  // delimiter. Ground truth (python's csv.reader, quotechar "'") on '"a|' gives
+  // [['"a', '']] -- two columns split on the pipe -- while under quotechar '"' the
+  // same bytes are a single unterminated field with no delimiter visible at all.
+  // Score the stranded reading anyway and detection answers the ',' fallback, so
+  // the pipe that python finds is silently lost.
+  assert.strictEqual(detectQuote('"a|'), '"');
+  assert.strictEqual(sniff('"a|', '"').unterminated, true);
+  assert.strictEqual(sniff('"a|', "'").unterminated, false);
+  assert.strictEqual(detectDelimiter('"a|'), '|');
+  assert.strictEqual(detectDelimiter('"|'), '|');
+  assert.strictEqual(detectDelimiter("';;"), ';');
+
+  // A genuinely single-column file, where no candidate delimiter appears at all
+  // and every reading terminates cleanly: there is nothing to detect, so the ','
+  // fallback stands. ('|"\n' is NOT such a case -- under quotechar "'" the pipe is
+  // plainly visible, so '|' is the right answer and the guard still applies.)
+  assert.strictEqual(detectDelimiter('alpha\nbeta\ngamma'), ',');
+  assert.strictEqual(detectDelimiter('alpha\nbeta\ngamma', '"'), ',');
+});
+
+test('parse: detectDelimiter honours an explicit quote character', () => {
+  // With the quote character fixed there is no guessing, so the delimiter is
+  // scored under exactly the reading the parser will use.
+  assert.strictEqual(detectDelimiter('a;b\n"x,y";2', '"'), ';');
+  assert.strictEqual(detectDelimiter('a;b\n"x,y";2', "'"), ';');
+});
+
+test('parse: sniff reports an unterminated quote rather than inventing tallies', () => {
+  // The returned shape carries enough information for detectDelimiter to reject
+  // a reading in which the file is not CSV, which is the whole fix.
+  const stuck = sniff('"unterminated\tfield', '"');
+  assert.strictEqual(stuck.unterminated, true);
+  const clean = sniff('a\tb\n1\t2', '"');
+  assert.strictEqual(clean.unterminated, false);
+  assert.deepStrictEqual(clean.stats.get('\t'), [1, 1]);
+});
+
+test('parse: detection scores the delimiter under the quote character it will use', () => {
+  // 'a;b\n"x,y,z";2' read with quotechar '"' has its commas inside a quoted field,
+  // so the semicolon is the only delimiter visible and wins. Read with quotechar
+  // "'" the file is also perfectly valid CSV -- the double quotes are then just
+  // data, so the comma really does separate two fields -- and ',' outscores ';'.
+  // Both answers are correct for the dialect they assume, which is why detection
+  // has to pick a reading and commit to it instead of blending two scores.
+  //
+  // Earlier this function scored both readings and kept the best, so the
+  // quote-disabled reading could outvote the real one; and before that it guessed
+  // the quote character mid-walk, which lost the delimiter outright.
+  assert.strictEqual(detectDelimiter('a;b\n"x,y,z";2', '"'), ';');
+  assert.strictEqual(detectDelimiter('a;b\n"x,y,z";2', "'"), ',');
+
+  // End to end the parse uses detectQuote's answer, and the quoted field
+  // survives as one cell -- 'a;b' is the header, so the data row is column 0.
+  const t = parseCsv('a;b\n"x,y,z";2');
+  assert.strictEqual(t.delimiter, ';');
+  assert.strictEqual(t.quote, '"');
+  assert.deepStrictEqual(t.header, ['a', 'b']);
+  assert.strictEqual(t.rows[0][0], 'x,y,z');
+  assert.strictEqual(t.rows[0][1], 2);
 });
 
 test('parse: end-to-end dialect detection picks the right separator and quote', () => {
