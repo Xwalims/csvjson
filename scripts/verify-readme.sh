@@ -123,4 +123,28 @@ want='[
 "a,b\n1,2\n"'
 eq "library API" "$got" "$want"
 
+# A column named __proto__. The README claims all three shapes keep it and that
+# the csv -> json -> csv cycle is byte-identical, so all of that is checked here
+# rather than trusted.
+printf '__proto__,a\n1,2\n3,4\n' > "$D/p.csv"
+eq "to-json __proto__ column" "$($BIN to-json "$D/p.csv" --compact)" '[{"__proto__":1,"a":2},{"__proto__":3,"a":4}]'
+eq "to-json __proto__ ndjson" "$($BIN to-json "$D/p.csv" --ndjson)" '{"__proto__":1,"a":2}
+{"__proto__":3,"a":4}'
+eq "to-json __proto__ columns" "$($BIN to-json "$D/p.csv" --columns --compact)" '{"columns":{"__proto__":[1,3],"a":[2,4]},"rows":2}'
+
+$BIN to-json "$D/p.csv" --compact -o "$D/p.json"
+eq "__proto__ round trip is byte-identical" "$(diff "$D/p.csv" <($BIN to-csv "$D/p.json") >/dev/null && echo IDENTICAL)" "IDENTICAL"
+$BIN to-json "$D/p.csv" --columns --compact -o "$D/pc.json"
+eq "__proto__ columns round trip" "$($BIN to-csv "$D/pc.json")" '__proto__,a
+1,2
+3,4'
+
+# The README shows this document coming back with an EMPTY cell, not
+# [object Object]: to-csv unions the key names across records, and the second
+# record has no __proto__ of its own.
+printf '%s' '[{"__proto__":{"p":1},"a":1},{"a":2}]' > "$D/m.json"
+eq "to-csv absent __proto__ cell is empty" "$($BIN to-csv "$D/m.json")" '__proto__,a
+[object Object],1
+,2'
+
 if [ "$fail" -eq 0 ]; then echo "ALL README EXAMPLES VERIFIED"; else echo "README MISMATCH"; exit 1; fi

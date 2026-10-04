@@ -47,6 +47,7 @@ $ npm link          # provides the `csvjson` command
 - [Quick start](#quick-start)
 - [Output shapes](#output-shapes)
 - [Numeric headers break the round trip](#numeric-headers-break-the-round-trip)
+- [A column named `__proto__` is kept](#a-column-named-__proto__-is-kept)
 - [Dialect detection](#dialect-detection)
 - [Library API](#library-api)
 - [License](#license)
@@ -181,6 +182,64 @@ they land back in the original order.
 
 Workaround: keep the original header row alongside the data, or name your
 columns, so nothing depends on a numeric header surviving.
+
+## A column named `__proto__` is kept
+
+A header cell can legally be the text `__proto__`, and that column survives all
+three shapes byte for byte:
+
+```console
+$ printf '__proto__,a\n1,2\n3,4\n' > p.csv
+$ csvjson to-json p.csv --compact
+[{"__proto__":1,"a":2},{"__proto__":3,"a":4}]
+
+$ csvjson to-json p.csv --columns --compact
+{"columns":{"__proto__":[1,3],"a":[2,4]},"rows":2}
+
+$ csvjson to-json p.csv --compact | csvjson to-csv -
+__proto__,a
+1,2
+3,4
+```
+
+This one needs a note, because `__proto__` is a trap for anyone writing the
+obvious code. It is not a property of the prototype; it is an **accessor**
+defined on `Object.prototype`, so `obj[key] = value` for that name runs a setter
+that swaps the object's prototype instead of creating a key:
+
+```console
+$ node -e 'const o = {}; o.__proto__ = 1; console.log(Object.keys(o), JSON.stringify(o))'
+[] {}
+```
+
+The value is not hidden, it is **gone** — `Object.keys` skips it and
+`JSON.stringify` omits it. So the straightforward implementation of the JSON
+shapes, `obj[header[i]] = row[i]`, silently deleted that column and reported
+nothing: a one-column file came back as `{}`. `Object.defineProperty` creates a
+real own property instead, which is exactly what `JSON.parse('{"__proto__":1}')`
+does for the same bytes, and that is what the package does. See `setKey()` in
+`src/stringify.js`.
+
+Reading needed the mirror fix. `to-csv` unions the key names across every record,
+so for `[{"__proto__":{"p":1},"a":1},{"a":2}]` the header contains `__proto__`
+while the second record simply has no such cell. Reading `obj["__proto__"]` on
+that record does not return `undefined` — it returns the inherited
+`Object.prototype`, so the missing cell was written as `[object Object]`:
+
+```console
+$ csvjson to-csv - <<< '[{"__proto__":{"p":1},"a":1},{"a":2}]'
+__proto__,a
+[object Object],1
+,2
+```
+
+Every other absent key renders as an empty field, and so does this one now.
+`ownValue()` in `src/stringify.js` reads only own properties.
+
+Names like `constructor`, `toString` and `hasOwnProperty` need no special
+handling: those are plain data properties on the prototype, so assigning to them
+creates an own property that shadows the inherited one, exactly as `JSON.parse`
+does.
 
 ## Dialect detection
 
