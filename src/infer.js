@@ -115,20 +115,36 @@ function inferColumn(cells, options = {}) {
   if (mode === 'all-string') return 'string';
   if (mode === 'number' || mode === 'boolean' || mode === 'null') return mode;
 
+  // Collect the kinds of EVERY cell, then decide once. Deciding inside the loop
+  // cannot work: an empty cell is neutral, so the moment one appears next to a
+  // boolean the old code settled on 'boolean' and returned, never looking at
+  // the cells after it. So `true,'',1` typed boolean (blank in row 2) and
+  // `true,1,''` typed string (blank in row 3) -- one column, one rule, two
+  // answers decided by where a blank happened to sit in the file.
+  //
+  // The early return also DESTROYED data. A boolean verdict makes auto-mode
+  // coercion null out anything that is not a boolean literal, so the number
+  // that was never examined came out as `null`:
+  //
+  //   name,ok        name,ok            [{"name":"alice","ok":true},
+  //   alice,true     alice,true    -->   {"name":"bob","ok":null},
+  //   bob,           bob,1             {"name":"carol","ok":null}]   <- "1" lost
+  //   carol,1        carol,
+  //
+  // The cost is not limited to the cells that follow the blank either. A
+  // boolean column typed off the first two rows keeps nulling every numeric
+  // cell in the rest of the file, so the column's type depends on row order
+  // AND the early rows are trusted over the late ones.
   const kinds = new Set();
-  for (const cell of cells) {
-    const kind = classifyCell(cell);
-    kinds.add(kind);
-    // A single non-null, non-neutral kind other than boolean/number forces string.
-    if (kind === 'string') return 'string';
-    if (kinds.size > 1 && kinds.has('boolean')) {
-      // numbers mixed with booleans is already a conflict, but a boolean column
-      // containing a number is the only case we let resolve to boolean first.
-      if (!kinds.has('number')) return 'boolean';
-      return 'string';
-    }
-  }
+  for (const cell of cells) kinds.add(classifyCell(cell));
+
   if (kinds.size === 0) return 'null';
+  // One string is enough to sink the column: a column is atomic, so a single
+  // non-numeric cell keeps the whole thing text.
+  if (kinds.has('string')) return 'string';
+  // Numbers mixed with booleans is the one genuine conflict left once strings
+  // and blanks are out of the way, and it resolves to string as well.
+  if (kinds.has('number') && kinds.has('boolean')) return 'string';
   if (kinds.has('number')) return 'number';
   if (kinds.has('boolean')) return 'boolean';
   return 'null';

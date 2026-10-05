@@ -60,6 +60,54 @@ test('infer: mixed booleans and numbers fall back to string', () => {
   assert.strictEqual(inferColumn(['true', '1']), 'string');
 });
 
+test('infer: the column type does not depend on where a blank cell sits', () => {
+  // Regression. The verdict used to be taken inside the scan loop, so the first
+  // empty cell next to a boolean ended it early and everything after the blank
+  // was never classified. `true,'',1` therefore typed boolean while
+  // `true,1,''` typed string: one column, one rule, two answers.
+  const expected = inferColumn(['true', '1']);
+  const blanks = ['', null, 'null', '   '];
+  for (const blank of blanks) {
+    assert.strictEqual(inferColumn([blank, 'true', '1']), expected);
+    assert.strictEqual(inferColumn(['true', blank, '1']), expected);
+    assert.strictEqual(inferColumn(['true', '1', blank]), expected);
+  }
+});
+
+test('infer: a blank cell never nulls out a value the scan never reached', () => {
+  // The data-loss half of the same bug. A boolean verdict makes auto-mode
+  // coercion null anything that is not a boolean literal, so the early return
+  // turned a number that was still unread into a `null` in the output.
+  const { rows } = inferRows([['true'], [''], ['1']], 1);
+  assert.deepStrictEqual(rows, [['true'], [''], ['1']]);
+  // ...and the same column with the blank moved keeps the value too.
+  const moved = inferRows([['true'], ['1'], ['']], 1);
+  assert.deepStrictEqual(moved.rows, [['true'], ['1'], ['']]);
+});
+
+test('infer: a boolean verdict requires every cell to be a boolean or blank', () => {
+  // A number anywhere in the column -- however far down -- disqualifies it.
+  for (const cells of [
+    ['true', 'false', '', '9'],
+    ['', '9', 'true', 'false'],
+    ['true', 'false', null, '0'],
+  ]) {
+    assert.strictEqual(inferColumn(cells), 'string');
+  }
+  // With only booleans and blanks it really is a boolean column.
+  assert.strictEqual(inferColumn(['', 'true', 'false', '']), 'boolean');
+});
+
+test('infer: every permutation of one cell multiset gives one type', () => {
+  const cells = ['true', '', '1', 'false'];
+  const permute = (rest) =>
+    rest.length === 0
+      ? [[]]
+      : rest.flatMap((c, i) => permute(rest.slice(0, i).concat(rest.slice(i + 1))).map((p) => [c, ...p]));
+  const types = new Set(permute(cells).map((p) => inferColumn(p)));
+  assert.deepStrictEqual([...types], ['string']);
+});
+
 test('infer: an all-null column is typed null', () => {
   assert.strictEqual(inferColumn(['', '', '']), 'null');
 });
