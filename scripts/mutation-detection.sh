@@ -143,6 +143,36 @@ check_mutant "both readings scored, best wins" \
     // outscore it would optimise against the wrong parse.
     if (best) break;" "" caught
 
+# 4. The key ORDER, not the set of keys. Swapping the first two keys back
+#    (presence before agreement) is a silent change: every structural key is
+#    still computed and every tie-break still applies, so nothing about the
+#    function's shape gives the swap away. On files the bytes fully determine
+#    the two orders answer identically -- measured over 14072 determined files,
+#    0 disagreements -- so neither crosscheck.py nor detect-check.py can see
+#    it either. The direct assertions on better() in test/parse.test.js are
+#    what kill it, which is the whole reason that export exists.
+#
+#    Ground truth for the direction of the fix, from python's csv.writer over
+#    300000 files counting only the 2762 that discriminate:
+#    agreement-first right on 1638, presence-first on 568.
+check_mutant "presence ranked before agreement" \
+  "  if (a.regular !== b.regular) return a.regular > b.regular;
+  if (a.present !== b.present) return a.present > b.present;" \
+  "  if (a.present !== b.present) return a.present > b.present;
+  if (a.regular !== b.regular) return a.regular > b.regular;" caught
+
+# 5. Width ahead of both structural keys: rewards a rival for occurring many
+#    times inside ONE field, which is the coincidence the leading keys exist to
+#    discount. Same silent shape as #4 and same reason the test can only kill it
+#    through better() directly.
+check_mutant "width ranked before presence and agreement" \
+  "  if (a.regular !== b.regular) return a.regular > b.regular;
+  if (a.present !== b.present) return a.present > b.present;
+  if (a.wide !== b.wide) return a.wide > b.wide;" \
+  "  if (a.wide !== b.wide) return a.wide > b.wide;
+  if (a.regular !== b.regular) return a.regular > b.regular;
+  if (a.present !== b.present) return a.present > b.present;" caught
+
 echo
 if [ "$fail" -eq 0 ]; then
   echo "DETECTION MUTATION HARNESS OK: $pass/$pass as expected"

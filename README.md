@@ -271,14 +271,29 @@ reported as a single column. Trying the other quote character is a linear cost; 
 guess made mid-scan would need look-ahead to undo itself, which is quadratic in
 the sample size.
 
+Candidates are compared lexicographically, never summed. In order: **agreement**
+(how many records share the candidate's modal count), **presence** (how many
+records contain it at all), **width** (the modal count), **raw occurrences**, and
+finally the candidate order as a documented tie-break.
+
+Agreement leads because the delimiter separates every field of every record, so
+those records agree on how many fields there are, while a stray `;` sits in the
+one row that mentions it. Presence and agreement are indistinguishable on a
+rectangular file — over 14 072 files whose dialect the bytes fully determine,
+they never disagree — so the order between them is settled on ragged input.
+Counting only the 2 762 cases out of 300 000 where they answer differently,
+agreement-first is right on 1 638 and presence-first on 568.
+
 Two limits are worth stating plainly. First, detection is a heuristic: for a
 sample in which two dialects both terminate and both explain every byte, no
 algorithm can recover the writer's intent, and `csvjson` will not guess between
-them beyond its documented scoring order. Second, the guard against stranded
-quotes is a policy decision on input whose meaning the bytes do not determine —
-over every sample whose dialect *is* determined, dropping it changes nothing, and
-over random samples it changes 7.8% of answers. It is a safety net for malformed
-files, not a correctness guarantee.
+them beyond its documented scoring order. That limit is why the key order itself
+is tested against the ranking function rather than against sample strings — on
+ragged input the samples do not carry the information. Second, the guard against
+stranded quotes is a policy decision on input whose meaning the bytes do not
+determine — over every sample whose dialect *is* determined, dropping it changes
+nothing, and over random samples it changes 7.8% of answers. It is a safety net
+for malformed files, not a correctness guarantee.
 
 `--stats` prints the detected dialect and inferred types to **stderr**, leaving
 stdout clean for piping.
