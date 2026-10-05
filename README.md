@@ -318,6 +318,43 @@ Modes: `auto`, `all-string`, `number`, `boolean`, `null`. A forced mode is an
 explicit override: unconvertible values are preserved verbatim rather than
 dropped.
 
+The whole column is read before a type is decided, so **empty cells are
+neutral**: they never veto a type and never turn a value into a `null`. That
+makes the verdict independent of row order, which is the point — moving a blank
+cell up or down cannot re-type a column or discard a value that sat below it.
+A column needs every non-blank cell to agree:
+
+| column contains | type | why |
+| --- | --- | --- |
+| any non-numeric, non-boolean text | `string` | a column is atomic |
+| booleans *and* numbers | `string` | a genuine conflict |
+| numbers only | `number` | |
+| booleans only | `boolean` | |
+| nothing but blanks | `null` | |
+
+So a `1` buried under a boolean column still keeps the column honest — it
+makes it a `string` rather than silently becoming `null` next to `true`:
+
+```console
+$ printf 'name,ok\nalice,true\nbob,1\n' | csvjson to-json - --compact
+[{"name":"alice","ok":"true"},{"name":"bob","ok":"1"}]
+```
+
+Note that `true` is *not* a boolean here either. Booleans and numbers cannot
+share a column, and the tie resolves to text, which is the same rule that
+keeps `10` from landing next to `"high"`. To keep the booleans as booleans and
+still see the numbers, name the type yourself with `--types boolean` — a
+forced mode preserves what it cannot convert:
+
+```console
+$ printf 'name,ok\nalice,true\nbob,1\n' | csvjson to-json - --compact --types boolean
+[{"name":"alice","ok":true},{"name":"bob","ok":"1"}]
+```
+
+`--types all-string` gives the same JSON here, but a real `boolean` column is
+worth keeping as one, so prefer the forced mode when the column genuinely is
+boolean and the stray number is the anomaly.
+
 ## Ragged rows
 
 Rows whose width disagrees with the header are reconciled by `--ragged`:
