@@ -82,9 +82,21 @@ test('cli: to-json -o keeps an embedded newline intact in the JSON', (t) => {
 });
 
 test('cli: exit code 3 on a file with an unterminated quote', (t) => {
+  // Ground truth first, and it says these bytes are NOT malformed: python's
+  // csv.reader with quotechar "'" reads them as a clean three-row table
+  // ([['a','b'], ['c','"unterminated'], ['d','e']]), because a '"' that opens a
+  // field is only an opener under a dialect whose quotechar it is. The previous
+  // fixtures stranded an opener under BOTH candidates only by accident -- under
+  // quotechar "'" they were ordinary text -- so detection picked the quote that
+  // could read the file and the file is reported as the data it is.
+  //
+  // The exit-3 path still has to work, so the fixture here strands an opener
+  // under BOTH candidates: one '"' and one "'", neither closed. csv.reader
+  // errors on this under either quotechar (strict=True reports "unexpected end
+  // of data" for both), so there is no legal reading left to fall back to.
   const dir = tmpdir(t);
   const bad = path.join(dir, 'bad.csv');
-  fs.writeFileSync(bad, 'a,b\nc,"unterminated\nd,e\n');
+  fs.writeFileSync(bad, 'a,b\nc,"unterminated\nd,\'dangling\n');
   const r = run(['to-json', bad]);
   assert.strictEqual(r.status, EXIT_DATA_ERROR, 'malformed CSV must be distinguishable from a crash');
   assert.match(r.stderr, /unterminated quoted field/);
@@ -93,10 +105,26 @@ test('cli: exit code 3 on a file with an unterminated quote', (t) => {
 test('cli: exit code 3 on an unterminated quote with no trailing newline', (t) => {
   const dir = tmpdir(t);
   const bad = path.join(dir, 'bad2.csv');
-  fs.writeFileSync(bad, 'a,b\nc,"dangling');
+  fs.writeFileSync(bad, 'a,b\nc,"unterminated\nd,\'dangling');
   const r = run(['to-json', bad]);
   assert.strictEqual(r.status, EXIT_DATA_ERROR);
   assert.match(r.stderr, /unterminated quoted field/);
+});
+
+test('cli: a stray quote is data, not malformed input', (t) => {
+  // The same bytes as the fixture above with only the '"' opener, which is what
+  // the old exit-3 test used. Under quotechar "'" python's csv.reader reports
+  // [['a','b'], ['c','"unterminated'], ['d','e']] and under '"' it folds the
+  // rest of the file into one field, so the file is legal CSV either way and
+  // throwing on it would be reporting a bug in the reader as a bad file.
+  // Detection picks the reading that terminates and keeps all three rows.
+  const dir = tmpdir(t);
+  const f = path.join(dir, 'stray.csv');
+  fs.writeFileSync(f, 'a,b\nc,"unterminated\nd,e\n');
+  const r = run(['to-json', f]);
+  assert.strictEqual(r.status, EXIT_OK);
+  const parsed = JSON.parse(r.stdout);
+  assert.deepStrictEqual(parsed, [{ a: 'c', b: '"unterminated' }, { a: 'd', b: 'e' }]);
 });
 
 test('cli: exit code 3 when --ragged error rejects a short row', () => {

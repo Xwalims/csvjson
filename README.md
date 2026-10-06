@@ -262,14 +262,65 @@ Candidates are `,` `;` tab and `|`, with `"` and `'` for quoting. Override them
 with `--delimiter` / `--quote`, or bypass detection entirely with `--no-detect`
 (which assumes comma + `"`).
 
-Detection runs as a pipeline: the quote character is chosen first, and the
-delimiter is then scored under that quote character only. A reading in which the
-sample ends inside a quoted field is rejected outright, because such a sample is
-not CSV under that assumption — every delimiter after the stranded opening quote
-would be invisible, and scoring it highest is how a tab-separated file used to be
-reported as a single column. Trying the other quote character is a linear cost; a
-guess made mid-scan would need look-ahead to undo itself, which is quadratic in
-the sample size.
+Detection runs as a pipeline, but it is **one decision, not two**. The quote
+character and the delimiter cannot be picked independently: the delimiter is
+counted outside quoted regions, so which quote character you assume decides
+which delimiters are visible, and if that assumption strands an opening quote
+every delimiter after it disappears. `detectDialect()` therefore returns both
+halves of the reading it used, and the parser tokenizes under exactly that pair.
+
+A reading in which the sample ends inside a quoted field is rejected outright —
+such a sample is not CSV under that assumption, and scoring it highest is how a
+tab-separated file used to be reported as a single column. The other candidate is
+then tried, which is a linear cost; a guess made mid-scan would need look-ahead
+to undo itself, which is quadratic in the sample size.
+
+That pairing is not a detail. Detection used to call `detectQuote()` and
+`detectDelimiter()` separately, and `detectDelimiter()` would sometimes score the
+delimiter under the *other* quote character while returning only the separator —
+so the parse kept a quote character that no reading had been scored against. On
+
+```
+col0',col1
+,''
+NULL,'
+```
+
+`detectQuote()` answered `'`, `detectDelimiter()` answered `,` (scored under
+`"`), and the table was then tokenized under `'` with the first `'` still open:
+`E_UNTERMINATED_QUOTE` at line 3, column 6, exit code 3. Those bytes are not
+malformed. `csv.reader` with `quotechar='"'` reads them as three rows and six
+fields, and under `quotechar="'"` the two apostrophes at field starts are
+ordinary text. Over 4000 files written by Python's `csv.writer` with
+`quotechar='"'`, the two-call split raised `E_UNTERMINATED_QUOTE` on **266** of
+them and silently mangled another **943**; reading them as one decision fixes the
+266 and leaves the rest ambiguous (see the limits below).
+
+```console
+$ printf "col0',col1\n,''\nNULL,'\n" > stray.csv
+$ csvjson to-json stray.csv --compact
+[{"col0'":null,"col1":"''"},{"col0'":null,"col1":"'"}]
+```
+
+(First column typed null: those cells are `''` and `'`, both recognised null
+literals. `--types all-string` keeps them as text.)
+
+One case deserves naming, because it is the easy mistake in the other direction:
+a reading that reveals **no delimiter candidate at all** is not a rejected
+reading, it is a single-column file, and the `,` fallback stands. Swapping the
+quote character because the winner found no delimiter turns a three-row file
+into three columns, because the comma was never quoting anything.
+
+```console
+$ printf 'col0'"'"'\n"a,b"\n'"'"'start\n' > one.csv
+$ csvjson to-json one.csv --no-header --compact
+[{"0":"col0'"},{"0":"a,b"},{"0":"'start"}]
+```
+
+Passing `--quote` pins the quote character: it is never swapped, so a file that
+strands an opener under it still fails loudly instead of being read as something
+you did not ask for. `--delimiter` likewise wins, while the quote character is
+still detected — a stranded quote throws on the whole file.
 
 Candidates are compared lexicographically, never summed. In order: **agreement**
 (how many records share the candidate's modal count), **presence** (how many
@@ -427,14 +478,38 @@ should fail the build.
 | `3` | malformed CSV — unterminated quote, or a ragged row under `--ragged error` |
 
 Code `3` is deliberately distinct so CI can tell *bad data* apart from *the tool
-falling over*:
+falling over*. "Unterminated" here means a quote stranded under **every** quote
+character `csvjson` sniffs for, so that no legal reading is left:
 
 ```console
-$ printf 'a,b\nc,"unterminated\nd,e\n' > bad.csv
+$ printf 'a,b\nc,"unterminated\nd,%s\n' "'dangling" > bad.csv
 $ csvjson to-json bad.csv; echo "exit=$?"
 csvjson: unterminated quoted field starting at line 2, column 3
 exit=3
 ```
+
+A lone stray `"` is not that. Under `quotechar="'"` the bytes parse cleanly, so
+detection uses that quote and the file is reported as the data it is — the same
+file with the second line's `'` removed:
+
+```console
+$ printf 'a,b\nc,"unterminated\nd,e\n' > stray.csv
+$ csvjson to-json stray.csv; echo "exit=$?"
+[
+  {
+    "a": "c",
+    "b": "\"unterminated"
+  },
+  {
+    "a": "d",
+    "b": "e"
+  }
+]
+exit=0
+```
+
+Reporting that as a malformed file would be a bug in the reader dressed up as a
+property of the input.
 
 ## Library API
 

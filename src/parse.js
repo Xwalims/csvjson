@@ -88,7 +88,32 @@ function sniff(sample, quoteChar = '"') {
 }
 
 /**
- * Choose a delimiter by scoring each candidate on the sample.
+ * Choose the delimiter AND the quote character as ONE decision.
+ *
+ * detectDialect() returns both halves of the reading it used, because the two
+ * cannot be picked apart. detectDelimiter() below may have to score the
+ * delimiter under the other quote character when the preferred one strands an
+ * opener; a caller that kept the quote it had already chosen would then parse
+ * under a quote the delimiter was never scored against. That split is not a
+ * hypothetical -- see the note on the module's export below.
+ *
+ * `options.quote` pins the quote character: a pinned quote is never swapped for
+ * the other candidate, even when it terminates no reading at all, because the
+ * operator asked for that character. `options.preferQuote` only biases the
+ * order -- it is still swapped when it strands an opener, which is what
+ * detectDelimiter() below has always done. `options.delimiter` is not consulted
+ * -- a caller may bring its own delimiter and still want a quote that reads the
+ * whole file.
+ *
+ * A reading that reveals NO delimiter candidate is not a bad reading, it is a
+ * single-column file, and the ',' fallback stands. Only a stranded opener
+ * disqualifies a quote character, because only that one is evidence about the
+ * bytes rather than about the data inside them: a comma in a single-column file
+ * is text, while a quote that opens a field nobody closes is malformed. Falling
+ * through to the other candidate when the winner simply had no delimiter cost
+ * real reads -- see the commit message.
+ *
+ * From here down the delimiter is scored on the sample.
  *
  * The candidate that appears in EVERY record is the delimiter. A candidate that
  * shows up in one record only is a coincidence of the data, and the ranking has
@@ -153,19 +178,21 @@ function sniff(sample, quoteChar = '"') {
  * back to ','. Trying one alternative is a linear cost; a guess made mid-scan
  * would need look-ahead to undo itself, which is quadratic in the sample size.
  */
-function detectDelimiter(sample, quoteChar) {
-  const first = typeof quoteChar === 'string' && quoteChar.length ? quoteChar : detectQuote(sample);
-  const order = [first].concat(QUOTE_CANDIDATES.filter((q) => q !== first));
-  let best = null;
+function detectDialect(sample, options = {}) {
+  const pinned = typeof options.quote === 'string' && options.quote.length ? options.quote : null;
+  const preferred =
+    typeof options.preferQuote === 'string' && options.preferQuote.length ? options.preferQuote : null;
+  const first = pinned || preferred || detectQuote(sample);
+  const order = pinned ? [first] : [first].concat(QUOTE_CANDIDATES.filter((q) => q !== first));
   for (const quote of order) {
     const { stats, unterminated } = sniff(sample, quote);
     if (unterminated) continue; // not a CSV file under this quote character
+    let best = null;
     for (const d of DELIMITER_CANDIDATES) {
       const counts = stats.get(d);
       if (!counts.length) continue;
       const total = counts.reduce((a, b) => a + b, 0);
       if (total === 0) continue;
-      // Consistency: how many records share the modal width.
       const freq = new Map();
       for (const c of counts) freq.set(c, (freq.get(c) || 0) + 1);
       let modal = 0;
@@ -176,8 +203,6 @@ function detectDelimiter(sample, quoteChar) {
           modalCount = n;
         }
       }
-      // `counts.length` is the number of records the candidate appears in:
-      // sniff() omits a record entirely when the candidate is absent from it.
       const score = {
         present: counts.length,
         wide: modal,
@@ -190,9 +215,38 @@ function detectDelimiter(sample, quoteChar) {
     // The first quote character that yields a whole-file reading wins outright.
     // Its reading is the one the parser will actually use, so letting a rival
     // outscore it would optimise against the wrong parse.
-    if (best) break;
+    //
+    // No delimiter candidate at all is a single-column file, not a rejected
+    // reading: the answer is the ',' fallback, under the quote that was used.
+    // Falling through to the other quote character here would swap a working
+    // reading for a worse one -- on `'col0'\n"a,b"\n'start\n' the correct table
+    // comes back as ["col0'"], ["a,b"], ["'start"], and a quote swap splits
+    // "a,b" into two columns because the comma was never quoting anything.
+    if (best) return { delimiter: best.delimiter, quote };
+    return { delimiter: ',', quote };
   }
-  return best ? best.delimiter : ',';
+  return { delimiter: ',', quote: first };
+}
+
+/**
+ * Choose a delimiter by scoring each candidate on the sample.
+ *
+ * The quote character the winning delimiter was scored under is deliberately
+ * NOT returned: a caller that parses afterwards must use detectDialect(), or it
+ * will tokenize under a quote this function never scored against. parseCsv()
+ * returning `quote` from detectQuote() while taking `delimiter` from here was
+ * exactly that mistake, and it threw E_UNTERMINATED_QUOTE on 266 of 4000 files
+ * written by python's csv.writer with quotechar '"' (see the commit message).
+ *
+ * `quoteChar` only PREFERS a candidate: it may still be swapped out, as it
+ * always was, so this stays a delimiter answer and not a dialect answer.
+ *
+ * @param {string} sample
+ * @param {string} [quoteChar] preferred quote character, may be swapped out
+ * @returns {string}
+ */
+function detectDelimiter(sample, quoteChar) {
+  return detectDialect(sample, { preferQuote: quoteChar }).delimiter;
 }
 
 /**
@@ -319,10 +373,21 @@ function parseCsv(input, options = {}) {
     delimiter = opts.delimiter || ',';
     quote = opts.quote || '"';
   } else {
-    // Quote first, then delimiter: the delimiter is scored under the quote
-    // character the parse will really use. See detectDelimiter.
-    quote = opts.quote || detectQuote(sample);
-    delimiter = opts.delimiter || detectDelimiter(sample, quote);
+    // One decision, not two. detectQuote() alone can pick a quote character that
+    // strands an opener, while detectDelimiter() then quietly scores the
+    // delimiter under the OTHER candidate and returns that reading's separator.
+    // Keeping the first answer and taking the second half is how one file ended
+    // up tokenized under a quote nothing was scored against -- it threw
+    // E_UNTERMINATED_QUOTE on a file python's csv.reader reads without trouble.
+    // detectDialect() returns both halves of the reading it actually used.
+    //
+    // An explicit --quote pins the quote character and is never swapped, even if
+    // it terminates nothing: the operator asked for it. An explicit --delimiter
+    // is likewise kept, but the quote is still detected under the remaining
+    // candidate set, because a stranded quote throws on the whole file.
+    const dialect = detectDialect(sample, { quote: opts.quote || undefined });
+    quote = dialect.quote;
+    delimiter = opts.delimiter || dialect.delimiter;
   }
 
   const tok = new Tokenizer(Object.assign({}, opts, { delimiter, quote, positions: true }));
@@ -404,6 +469,7 @@ function parseCsv(input, options = {}) {
 module.exports = {
   RAGGED_MODES,
   sniff,
+  detectDialect,
   detectDelimiter,
   detectQuote,
   better,

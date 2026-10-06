@@ -5,6 +5,7 @@ const assert = require('node:assert');
 
 const {
   parseCsv,
+  detectDialect,
   detectDelimiter,
   detectQuote,
   applyRagged,
@@ -13,6 +14,119 @@ const {
   RAGGED_MODES,
 } = require('../src/parse.js');
 const { RaggedRowError, CsvError } = require('../src/tokenize.js');
+
+test('parse: the delimiter is detected under the quote the parser will use', () => {
+  // Regression: detection was two independent calls. detectQuote() answered a
+  // quote character that STRANDS an opener here, detectDelimiter() then quietly
+  // scored the delimiter under the other candidate and returned that reading's
+  // separator, and the parse kept the first answer while taking the second half.
+  // The table was then tokenized under a quote character no reading had been
+  // scored against, and the tokenizer's own rule made that fatal:
+  //
+  //   detectQuote      -> "'"    (the two field-start ' open a quoted field)
+  //   detectDelimiter  -> ','    (scored under '"', where they are literal text)
+  //   parseCsv         -> E_UNTERMINATED_QUOTE, line 3 column 6
+  //
+  // Ground truth is python's csv.reader on these exact bytes, delimiter ',' and
+  // quotechar '"': three rows, six fields, nothing unterminated. The bytes were
+  // never malformed -- csvjson invented the failure from two halves of one
+  // decision. Over 4000 files written by csv.writer with quotechar '"', the old
+  // two-call split threw on 266 of them; over the same corpus this test's shape
+  // (an apostrophe at a field start, a '"' reading that terminates) is 267.
+  const stray = "col0',col1\n,''\nNULL,'\n";
+  assert.strictEqual(detectQuote(stray), "'", 'detectQuote alone still strands an opener');
+  assert.strictEqual(sniff(stray, '"').unterminated, false);
+  assert.strictEqual(sniff(stray, "'").unterminated, true);
+  // detectDelimiter's own answer, and it is unchanged: a delimiter answer.
+  assert.strictEqual(detectDelimiter(stray), ',');
+  // The joint decision, which is what the parser has to use.
+  assert.deepStrictEqual(detectDialect(stray), { delimiter: ',', quote: '"' });
+
+  const t = parseCsv(stray, { types: 'all-string' });
+  assert.strictEqual(t.quote, '"');
+  assert.strictEqual(t.delimiter, ',');
+  assert.deepStrictEqual(t.header, ["col0'", 'col1']);
+  assert.deepStrictEqual(t.rows, [['', "''"], ['NULL', "'"]]);
+  assert.deepStrictEqual(t.ragged, [], 'six fields, no padding needed');
+
+  // A pinned quote is never swapped, even when it strands an opener: the
+  // operator asked for that character and gets the error, not a surprise.
+  assert.throws(() => parseCsv(stray, { quote: "'", types: 'all-string' }), /unterminated quoted field/);
+  assert.deepStrictEqual(detectDialect(stray, { quote: "'" }), { delimiter: ',', quote: "'" });
+
+  // preferQuote only biases the order, so detectDelimiter keeps its old
+  // fall-through contract and stays a delimiter-only answer.
+  assert.deepStrictEqual(detectDialect(stray, { preferQuote: "'" }), { delimiter: ',', quote: '"' });
+
+  // An explicit delimiter is the operator's call, but the quote is still
+  // detected: keeping a stranded quote here would throw on the whole file.
+  // Ground truth (csv.reader, delimiter=';', quotechar='"'): [["col0'","col1"],
+  // ["''",""],["NULL","'"]] -- note the apostrophes stay in the SECOND column.
+  const semi = parseCsv("col0';col1\n''\nNULL;'\n", { delimiter: ';', types: 'all-string' });
+  assert.strictEqual(semi.delimiter, ';');
+  assert.strictEqual(semi.quote, '"');
+  assert.deepStrictEqual(semi.header, ["col0'", 'col1']);
+  assert.deepStrictEqual(semi.rows, [["''", ''], ['NULL', "'"]]);
+});
+
+test('parse: a single-column file keeps the quote that reads it', () => {
+  // The counterpart rule. NO delimiter candidate is not a rejected reading, it
+  // is a single-column file, so the ',' fallback stands under the quote that was
+  // used. Falling through to the other quote character because the winner found
+  // no delimiter is wrong in both halves: the comma below is text in a file with
+  // one column, so under quotechar "'" the file strands an opener and the '"'
+  // reading is the only legal one -- and under '"' the delimiter is not even
+  // invisible, there simply is none.
+  const one = 'col0\'\n"a,b"\n\'start\n';
+  assert.deepStrictEqual(detectDialect(one), { delimiter: ',', quote: '"' });
+  const t = parseCsv(one, { types: 'all-string' });
+  assert.strictEqual(t.quote, '"');
+  assert.strictEqual(t.delimiter, ',');
+  assert.strictEqual(t.columnCount, 1);
+  assert.deepStrictEqual(t.header, ["col0'"]);
+  assert.deepStrictEqual(t.rows, [['a,b'], ["'start"]]);
+
+  // The tab is inside a '"' quoted field, so the '"' reading sees no tab at all
+  // and the file is a single column; the "'" reading sees the tab but folds three
+  // records into one. Ground truth (csv.reader, quotechar='"') is
+  // [["col0'"],['x\ty'],["'start"],[''],["'start"]] -- five rows, one column.
+  // csv.reader with delimiter=tab under quotechar='"' gives exactly the same,
+  // so the ',' fallback is right and the tab is invisible either way.
+  const tab = 'col0\'\n"x\ty"\n\'start\n""\n\'start\n';
+  assert.deepStrictEqual(detectDialect(tab), { delimiter: ',', quote: '"' });
+  const t2 = parseCsv(tab, { types: 'all-string' });
+  assert.strictEqual(t2.quote, '"');
+  assert.strictEqual(t2.delimiter, ',');
+  assert.deepStrictEqual(t2.header, ["col0'"]);
+  assert.deepStrictEqual(t2.rows, [['x\ty'], ["'start"], [''], ["'start"]]);
+});
+
+test('parse: a quote stranded under BOTH candidates is still an error', () => {
+  // The fix must not turn the error path into silence. One '"' and one "'", each
+  // opened at a field start and neither closed, so there is no legal reading.
+  // csv.reader agrees: strict=True reports "unexpected end of data" under either
+  // quotechar, and non-strict folds the tail into one field rather than erroring,
+  // which is why the harness compares against strict.
+  const bad = 'a,b\nc,"unterminated\nd,\'dangling\n';
+  assert.strictEqual(sniff(bad, '"').unterminated, true);
+  assert.strictEqual(sniff(bad, "'").unterminated, true);
+  assert.throws(() => parseCsv(bad), /unterminated quoted field/);
+
+  // No trailing newline is the same error, not a silently accepted file.
+  assert.throws(() => parseCsv('a,b\nc,"unterminated\nd,\'dangling'), /unterminated quoted field/);
+});
+
+test('parse: detectDialect is one decision, detectQuote is still available', () => {
+  // detectQuote answers the opener-count question on its own and is exported
+  // for callers that want it. It is deliberately NOT what parseCsv uses: it can
+  // return a character that no complete reading supports.
+  assert.strictEqual(detectQuote('a,"b,c"'), '"');
+  assert.strictEqual(detectQuote("a,'b,c'"), "'");
+  assert.strictEqual(detectQuote('a,b,c'), '"');
+  assert.deepStrictEqual(detectDialect('a,"b,c"'), { delimiter: ',', quote: '"' });
+  assert.deepStrictEqual(detectDialect("a,'b,c'"), { delimiter: ',', quote: "'" });
+  assert.deepStrictEqual(detectDialect('a,b,c'), { delimiter: ',', quote: '"' });
+});
 
 test('parse: basic table with header', () => {
   const t = parseCsv('a,b,c\n1,2,3\n', { detect: false });

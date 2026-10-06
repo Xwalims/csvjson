@@ -114,34 +114,57 @@ check_mutant "sniff guesses the quote character as it walks" \
 #    compete. Scoring it anyway makes detection commit to a broken parse and split
 #    a tab-separated file into single characters.
 #
-#    SURVIVES BY DESIGN, and that is a measured claim rather than a hope. Two
-#    numbers justify it. The guard changes the answer on 7.8% of random samples
-#    (31016 of 400000), so it is not dead code. But over every case
-#    detect-check.py actually scores -- that is, every sample whose dialect the
-#    bytes genuinely determine -- the number of disagreements is ZERO. Every input
-#    it moves is one whose meaning the bytes do not determine: on
-#    '\t\rb;\t|\r,,," \n' python's csv.reader accepts four dialects and returns
-#    four different tables, because csv.reader in non-strict mode never raises
-#    while csvjson refuses a dialect whose quoted field never closes. There is no
-#    ground truth to assert, so there is nothing for any gate to check.
+#    USED TO SURVIVE BY DESIGN, and the file used to claim that as a measured
+#    fact: over every case detect-check.py scores -- every sample whose dialect
+#    the bytes genuinely determine -- the guard changed nothing, so no gate could
+#    see it go. That was true, and it was also a hole. Once detection became ONE
+#    decision, dropping the guard no longer only picks a different dialect on
+#    undetermined input: it puts the stranded quote character back into the parse,
+#    and E_UNTERMINATED_QUOTE returns on files that are not malformed. Three tests
+#    now notice -- the joint-decision test, "a single-column file keeps the quote
+#    that reads it", and the CLI test that a stray quote is data.
 #
-#    Consequence worth stating plainly: the guard is a POLICY decision on
-#    undetermined input, not a correctness fix, and it is only reachable from
-#    malformed or ambiguous files. If it were dropped, no test here would object
-#    and the suite would stay green -- which is the honest cost of keeping it.
+#    The 7.8% figure below is kept because it still says the guard is live code
+#    rather than an unexercised branch, but it is no longer an argument that the
+#    guard is untested.
 check_mutant "stranded quoted region scored anyway" \
   "if (unterminated) continue; // not a CSV file under this quote character" \
-  "if (unterminated) { /* mutant */ }" "survived"
+  "if (unterminated) { /* mutant */ }" "caught"
 
 # 3. Detection must commit to the quote character the parser will really use.
 #    Scoring every reading and keeping the best score lets a reading in which
 #    quoting is switched off count delimiters that live inside quoted fields,
 #    which is the exact protection quoting provides.
+#    The anchor is the whole return-and-fall-through block: dropping the early
+#    return lets the loop carry on and try the rival quote character, which is
+#    the mutant. It used to end at `if (best) break;`, before the joint decision
+#    became two returns -- keep the pattern in step with detectDialect().
 check_mutant "both readings scored, best wins" \
-  "    // The first quote character that yields a whole-file reading wins outright.
-    // Its reading is the one the parser will actually use, so letting a rival
-    // outscore it would optimise against the wrong parse.
-    if (best) break;" "" caught
+  "    if (best) return { delimiter: best.delimiter, quote };
+    return { delimiter: ',', quote };" "" caught
+
+# 3b. The bug this tick fixed, in mutation form. Returning both halves of the
+#     reading is what keeps the parser from tokenizing under a quote character
+#     the delimiter was never scored against; making parseCsv take the quote from
+#     detectQuote() again while the delimiter comes from the joint decision
+#     reproduces the old split exactly, and E_UNTERMINATED_QUOTE comes back on
+#     files that are not malformed.
+check_mutant "parse takes the quote from detectQuote again" \
+  "    const dialect = detectDialect(sample, { quote: opts.quote || undefined });
+    quote = dialect.quote;
+    delimiter = opts.delimiter || dialect.delimiter;" \
+  "    const dialect = detectDialect(sample, { quote: opts.quote || undefined });
+    quote = opts.quote || detectQuote(sample);
+    delimiter = opts.delimiter || dialect.delimiter;" caught
+
+# 3c. The counterpart rule: a reading with no delimiter candidate is a
+#     single-column file, not a rejected reading. Swapping the quote character
+#     because the winner found no delimiter splits a one-column file on a comma
+#     that was never quoting anything.
+check_mutant "no delimiter means try the other quote" \
+  "    if (best) return { delimiter: best.delimiter, quote };
+    return { delimiter: ',', quote };" \
+  "    if (best) return { delimiter: best.delimiter, quote };" caught
 
 # 4. The key ORDER, not the set of keys. Swapping the first two keys back
 #    (presence before agreement) is a silent change: every structural key is

@@ -22,7 +22,12 @@ printf 'name,qty,note\nwidget,3,"has, comma"\ngadget,5,"line1\nline2"\n' > "$D/r
 printf 'a;b;c\n1;2;3\n' > "$D/s.csv"
 printf 'name,qty\nw,1\ng,2\n' > "$D/t.csv"
 printf 'a,b,c\n1,2\n1,2,3,4\n' > "$D/g.csv"
-printf 'a,b\nc,"unterminated\nd,e\n' > "$D/bad.csv"
+printf 'a,b\nc,"unterminated\nd,e\n' > "$D/stray.csv"
+# A quote stranded under BOTH candidates: one '"' and one "'", neither closed,
+# so no legal reading exists. A single stray '"' is NOT malformed -- python's
+# csv.reader reads the bytes above as three rows under quotechar "'" -- and the
+# example above the exit-3 one is checked separately for exactly that reason.
+printf 'a,b\nc,"unterminated\nd,\x27dangling\n' > "$D/bad.csv"
 
 out=$($BIN to-json "$D/report.csv"); want='[
   {
@@ -76,6 +81,39 @@ eq "ragged error message" "$(cat "$D/err.txt")" 'csvjson: ragged row 2 (line 2) 
 $BIN to-json "$D/bad.csv" >/dev/null 2>"$D/err2.txt"; ec=$?
 eq "unterminated quote exit code" "$ec" "3"
 eq "unterminated quote message" "$(cat "$D/err2.txt")" 'csvjson: unterminated quoted field starting at line 2, column 3'
+
+# The same bytes minus the "'" opener. Detection picks the quote character that
+# reads the whole file and every row survives, so the tool reports data rather
+# than a failure it invented.
+eq "stray quote is data" "$($BIN to-json "$D/stray.csv" --compact)" '[{"a":"c","b":"\"unterminated"},{"a":"d","b":"e"}]'
+
+# The dialect-detection section: one decision, not two. On the stray fixture the
+# old code called detectQuote() -> "'" and detectDelimiter() -> "," (scored under
+# '"') and then tokenized under the stranded quote, throwing. These lines check
+# what that README paragraph claims the tool now does. The expected strings are
+# built with the apostrophe spliced in by hand: nothing here should depend on a
+# three-level quote nest to express one apostrophe.
+APOS="'"
+COL0_APOS="col0${APOS}"
+printf 'col0%s\n"a,b"\n%sstart\n' "$APOS" "$APOS" > "$D/one.csv"
+eq "single column keeps the quote that reads it" \
+  "$($BIN to-json "$D/one.csv" --no-header --compact)" \
+  "[{\"0\":\"${COL0_APOS}\"},{\"0\":\"a,b\"},{\"0\":\"${APOS}start\"}]"
+eq "single column is one column" \
+  "$($BIN to-json "$D/one.csv" --stats 2>&1 >/dev/null | sed -n '2p')" "columns: 1"
+eq "stray keeps all three rows" \
+  "$($BIN to-json "$D/stray.csv" --compact)" \
+  "[{\"a\":\"c\",\"b\":\"\\\"unterminated\"},{\"a\":\"d\",\"b\":\"e\"}]"
+# --quote pins: a file stranded under the pinned character still errors rather
+# than being silently read as something the caller did not ask for. $D/pin.csv
+# is the parse-level fixture, an apostrophe opening a field at a field start.
+printf 'col0%s,col1\n%s%s\nNULL,%s\n' "$APOS" "$APOS" "$APOS" "$APOS" > "$D/pin.csv"
+$BIN to-json "$D/pin.csv" --quote "$APOS" >/dev/null 2>&1; ec=$?
+eq "pinned quote is never swapped" "$ec" "3"
+# And the same file WITHOUT the pin reads cleanly, which is the whole point: the
+# pinned quote is honoured even when it is the one that strands an opener.
+$BIN to-json "$D/pin.csv" --compact >/dev/null 2>&1; ec=$?
+eq "unpinned quote reads the same file" "$ec" "0"
 
 eq "transpose" "$($BIN to-json "$D/t.csv" --transpose)" '[
   {

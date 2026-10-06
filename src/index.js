@@ -33,6 +33,7 @@ module.exports = {
 
   // parsing
   RAGGED_MODES: parseModule.RAGGED_MODES,
+  detectDialect: parseModule.detectDialect,
   detectDelimiter: parseModule.detectDelimiter,
   detectQuote: parseModule.detectQuote,
   applyRagged: parseModule.applyRagged,
