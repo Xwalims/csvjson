@@ -185,4 +185,26 @@ eq "to-csv absent __proto__ cell is empty" "$($BIN to-csv "$D/m.json")" '__proto
 [object Object],1
 ,2'
 
+# The README claims a quoted field longer than the 64 KiB sniff sample does not
+# change the dialect. A field straddling that boundary used to leave the sample
+# open, the '"' reading was thrown away, and the tabs inside it became column
+# breaks -- 70 KB of field silently returned as two empty ones plus an extra row.
+# python's csv.reader gives 2 rows for these bytes; check that we now agree.
+python3 - "$D/straddle.csv" <<'PY'
+import sys
+body = "y" * 70000
+open(sys.argv[1], "w", newline="").write('id\tnote\n1\t"line one\n%s"\n2\tplain\n' % body)
+PY
+# The field must survive whole, in one row, with the tabs still inside it.
+eq "sample straddled by a quoted field" \
+  "$($BIN to-json "$D/straddle.csv" --no-header --types all-string --compact | sed 's/y\{10,\}/<BODY>/g')" \
+  '[{"0":"id","1":"note"},{"0":"1","1":"line one\n<BODY>"},{"0":"2","1":"plain"}]'
+# --stats counts data rows, so the header is excluded: two rows, not three.
+eq "straddling sample keeps the quote" \
+  "$($BIN to-json "$D/straddle.csv" --stats 2>&1 >/dev/null | sed -n '3p;4p' | tr '\n' ' ')" \
+  'delimiter: "\t" quote: "\"" '
+eq "straddling sample is two rows" \
+  "$($BIN to-json "$D/straddle.csv" --stats 2>&1 >/dev/null | sed -n '1p')" \
+  'rows: 2'
+
 if [ "$fail" -eq 0 ]; then echo "ALL README EXAMPLES VERIFIED"; else echo "README MISMATCH"; exit 1; fi

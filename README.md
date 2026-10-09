@@ -269,11 +269,35 @@ which delimiters are visible, and if that assumption strands an opening quote
 every delimiter after it disappears. `detectDialect()` therefore returns both
 halves of the reading it used, and the parser tokenizes under exactly that pair.
 
-A reading in which the sample ends inside a quoted field is rejected outright —
-such a sample is not CSV under that assumption, and scoring it highest is how a
-tab-separated file used to be reported as a single column. The other candidate is
-then tried, which is a linear cost; a guess made mid-scan would need look-ahead
-to undo itself, which is quadratic in the sample size.
+A reading in which the sample ends inside a quoted field is rejected — but only
+when the sample really is the whole file. Such a reading is not CSV under that
+assumption, and scoring it highest is how a tab-separated file used to be
+reported as a single column. The other candidate is then tried, which is a
+linear cost; a guess made mid-scan would need look-ahead to undo itself, which is
+quadratic in the sample size.
+
+A **truncated** sample is different. Detection reads only the first 64 KiB, so a
+quoted field longer than that straddles the boundary and leaves the sample open.
+That is where the sample was *cut*, not a property of the bytes, and treating it
+as a malformed file swapped the quote character out from under a perfectly good
+reading. Everything the abandoned field protected then came back as structure:
+
+```
+id<TAB>note<TAB>tag
+1<TAB>"line one
+yyyy… (70 KB of it, containing tabs and newlines)
+"<TAB>t
+```
+
+`csv.reader` returns two rows. `csvjson` returned three, the 70 KB field as two
+empty ones, and the tabs inside it turned into column breaks — with no error
+anywhere. Detection now rescans the sample together with a bounded slice of the
+real input before rejecting anything, and only a reading that is *still* open at
+that cap is discarded. The lookahead is 256 KiB; beyond it a stranded opener is
+taken at face value again, so a genuinely malformed file still fails. Ground
+truth is `csv.reader` on the same bytes — see
+`scripts/sample-boundary-check.py`, where **135 of 200** generated files
+mis-parsed before and **0 of 200** mis-parse now, across five seeds.
 
 That pairing is not a detail. Detection used to call `detectQuote()` and
 `detectDelimiter()` separately, and `detectDelimiter()` would sometimes score the
@@ -344,7 +368,10 @@ ragged input the samples do not carry the information. Second, the guard against
 stranded quotes is a policy decision on input whose meaning the bytes do not
 determine — over every sample whose dialect *is* determined, dropping it changes
 nothing, and over random samples it changes 7.8% of answers. It is a safety net
-for malformed files, not a correctness guarantee.
+for malformed files, not a correctness guarantee. That guard now applies to the
+sample only when it is the whole file; a truncated sample is extended and
+rescanned first, because a quote left open by the cut is not evidence about the
+bytes.
 
 `--stats` prints the detected dialect and inferred types to **stderr**, leaving
 stdout clean for piping.

@@ -36,36 +36,43 @@ const RAGGED_MODES = Object.freeze(['pad', 'error', 'dump']);
  * as single-column and fell back to ','. `detectDelimiter` now scores the whole
  * scan under each candidate instead, so no guess is made mid-walk.
  *
- * Returns the per-candidate tally plus `unterminated`: true when the sample ends
- * inside a quoted region, i.e. the file is not valid CSV under this quote
- * character and the tally must not be trusted.
+ * `extend` is optional extra text scanned only when the base scan ends inside a
+ * quoted region; see sniffExtension(). It is concatenated rather than walked as
+ * a separate chunk because a `"` at the very end of one part and a `"` at the
+ * start of the next are an ESCAPED PAIR in the real file, and scoring them apart
+ * would turn `""` into two openers.
+ *
+ * Returns the per-candidate tally plus `unterminated`: true when the text ends
+ * inside a quoted region, i.e. the scanned text is not valid CSV under this
+ * quote character and the tally must not be trusted.
  */
-function sniff(sample, quoteChar = '"') {
+function sniff(sample, quoteChar = '"', extend = null) {
+  const text = extend === null || extend === undefined ? sample : sample + extend;
   const stats = new Map();
   for (const d of DELIMITER_CANDIDATES) stats.set(d, []);
   let recordCounts = new Map(); // delimiter -> counts for the current record
   let inQuotes = false;
   const quote = quoteChar;
 
-  for (let i = 0; i < sample.length; i += 1) {
-    const ch = sample[i];
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
     if (inQuotes) {
       if (ch === quote) {
-        if (sample[i + 1] === quote) i += 1; // escaped quote
+        if (text[i + 1] === quote) i += 1; // escaped quote
         else inQuotes = false;
       }
       continue;
     }
     // Not inside quotes: only a quote at a field start opens a quoted region.
     if (ch === quote) {
-      const prev = i > 0 ? sample[i - 1] : null;
+      const prev = i > 0 ? text[i - 1] : null;
       if (prev === null || DELIMITER_CANDIDATES.indexOf(prev) !== -1 || prev === '\n' || prev === '\r') {
         inQuotes = true;
       }
       continue;
     }
     if (ch === '\n' || ch === '\r') {
-      if (ch === '\r' && sample[i + 1] === '\n') i += 1;
+      if (ch === '\r' && text[i + 1] === '\n') i += 1;
       for (const d of DELIMITER_CANDIDATES) {
         if (recordCounts.has(d)) stats.get(d).push(recordCounts.get(d));
       }
@@ -86,6 +93,51 @@ function sniff(sample, quoteChar = '"') {
   }
   return { stats, unterminated: inQuotes };
 }
+
+/**
+ * The number of extra characters to scan when a truncated sample ends inside a
+ * quoted field, and how to get them.
+ *
+ * THE SAMPLE IS A PREFIX OF THE FILE. `parseCsv` hands sniff() the first
+ * `sampleSize` characters of the input, so a quoted field that straddles the
+ * boundary leaves the sample still open -- and an open quote at the END of a
+ * truncated sample says where the sample was CUT, not anything about the bytes.
+ * Treating it as a malformed file is a category error with a data-losing cost:
+ * the quote character gets disqualified on evidence that does not exist, the
+ * rival candidate is used instead, and then nothing quotes anything. Every
+ * delimiter inside the abandoned quoted field becomes a column break.
+ *
+ *   id<TAB>note<TAB>tag                     rowCount 3, noteLens [9, 0, 5]
+ *   1<TAB>"line one\nyyyy...(70 KB)"<TAB>t   -> the '"' reading is thrown away,
+ *   2<TAB>plain<TAB>u                        the 70 KB field splits on tabs and
+ *   3<TAB>"tail4"<TAB>v        python says    on newlines, and one row becomes
+ *                              rowCount 2,    three. 135 of 200 generated files
+ *                              noteLens       were mis-parsed this way.
+ *                              [4, 70009, 5]
+ *
+ * The quote character is the correct one; only the sample is short. So the
+ * sample is EXTENDED and rescanned under the same quote character until either
+ * the quoted region closes or a hard cap is reached. A cap still open means the
+ * file really does strand an opener, and the old disqualification stands -- a
+ * genuinely unterminated field must keep erroring, not silently parse.
+ *
+ * The extension is bounded and reused across candidates, so the worst case costs
+ * one capped scan per candidate rather than per candidate per step.
+ *
+ * @param {string} input the FULL text the sample was cut from
+ * @param {number} sampleSize
+ * @returns {string} text to scan after the sample, '' when there is none
+ */
+function sniffExtension(input, sampleSize) {
+  const remaining = input.length - sampleSize;
+  if (remaining <= 0) return '';
+  // Cap the lookahead. A field can legitimately span more than the sample, but
+  // scanning an unbounded tail to find its end would make detection O(file).
+  return input.slice(sampleSize, sampleSize + Math.min(remaining, SNIFF_LOOKAHEAD));
+}
+
+/** How far past the sample a truncated scan may look for the closing quote. */
+const SNIFF_LOOKAHEAD = 262144;
 
 /**
  * Choose the delimiter AND the quote character as ONE decision.
@@ -177,6 +229,20 @@ function sniff(sample, quoteChar = '"') {
  * file beginning with a lone double quote come back as single-column and fall
  * back to ','. Trying one alternative is a linear cost; a guess made mid-scan
  * would need look-ahead to undo itself, which is quadratic in the sample size.
+ *
+ * A stranded opener is only evidence when the sample is the WHOLE file. A
+ * truncated sample is a prefix, so an open quote at its end is where the sample
+ * was cut: `detectDialect` takes the rest of the input as `full` and rescans the
+ * sample together with a bounded extension (see sniffExtension) before
+ * disqualifying anything. A cap still open IS evidence and still disqualifies.
+ * Without this the sample boundary silently rewrites the dialect of any file
+ * with a quoted field longer than `sampleSize`.
+ *
+ * @param {string} sample
+ * @param {object} [options]
+ * @param {string} [options.quote] pinned quote character, never swapped
+ * @param {string} [options.preferQuote] preferred quote character, may swap
+ * @param {string} [options.full] the whole input, when the sample is a prefix
  */
 function detectDialect(sample, options = {}) {
   const pinned = typeof options.quote === 'string' && options.quote.length ? options.quote : null;
@@ -184,8 +250,20 @@ function detectDialect(sample, options = {}) {
     typeof options.preferQuote === 'string' && options.preferQuote.length ? options.preferQuote : null;
   const first = pinned || preferred || detectQuote(sample);
   const order = pinned ? [first] : [first].concat(QUOTE_CANDIDATES.filter((q) => q !== first));
+  // Bounded once and reused for every candidate, so a sample that strands an
+  // opener under both quotes costs two capped scans, not a rescan per step.
+  const extend =
+    typeof options.full === 'string' && options.full.length > sample.length
+      ? sniffExtension(options.full, sample.length)
+      : null;
   for (const quote of order) {
-    const { stats, unterminated } = sniff(sample, quote);
+    let { stats, unterminated } = sniff(sample, quote);
+    if (unterminated && extend) {
+      // The sample is a prefix of a longer file and stops inside a quoted
+      // field. That is where the sample ended, not a malformed file, so rescan
+      // the sample together with the tail of the real input before judging.
+      ({ stats, unterminated } = sniff(sample, quote, extend));
+    }
     if (unterminated) continue; // not a CSV file under this quote character
     let best = null;
     for (const d of DELIMITER_CANDIDATES) {
@@ -385,7 +463,12 @@ function parseCsv(input, options = {}) {
     // it terminates nothing: the operator asked for it. An explicit --delimiter
     // is likewise kept, but the quote is still detected under the remaining
     // candidate set, because a stranded quote throws on the whole file.
-    const dialect = detectDialect(sample, { quote: opts.quote || undefined });
+    // `full` is the whole input, so a sample that stops inside a quoted field
+    // is read as a sample boundary rather than as a malformed file.
+    const dialect = detectDialect(sample, {
+      quote: opts.quote || undefined,
+      full: input,
+    });
     quote = dialect.quote;
     delimiter = opts.delimiter || dialect.delimiter;
   }
@@ -469,6 +552,7 @@ function parseCsv(input, options = {}) {
 module.exports = {
   RAGGED_MODES,
   sniff,
+  sniffExtension,
   detectDialect,
   detectDelimiter,
   detectQuote,

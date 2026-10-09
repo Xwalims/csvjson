@@ -10,6 +10,7 @@ const {
   detectQuote,
   applyRagged,
   sniff,
+  sniffExtension,
   better,
   RAGGED_MODES,
 } = require('../src/parse.js');
@@ -376,6 +377,72 @@ test('parse: a genuine tie between equally regular candidates keeps the document
   assert.strictEqual(detectDelimiter('c0\tc1\rhas;semi\r1\r'), ';');
   // A '\t' against '|' tie likewise goes to the tab, the earlier candidate.
   assert.strictEqual(detectDelimiter('c0|c1\rhas\ttab\r1\r'), '\t');
+});
+
+test('parse: a sample cut inside a quoted field is a boundary, not a malformed file', () => {
+  // Regression: parseCsv hands sniff() the first `sampleSize` characters of the
+  // input, so a quoted field that STRADDLES that boundary leaves the sample open.
+  // An open quote at the end of a truncated sample says where the sample was CUT,
+  // not anything about the bytes -- but it was treated as a malformed file, which
+  // disqualifies the correct quote character on evidence that does not exist. The
+  // rival candidate is then used, nothing quotes anything, and every delimiter
+  // inside the abandoned quoted field becomes a column break:
+  //
+  //   id<TAB>note<TAB>tag                      rowCount 3, noteLens [9, 0, 5]
+  //   1<TAB>"line one\nyyy...(70 KB)"<TAB>t     vs python csv.reader:
+  //   2<TAB>plain<TAB>u                        rowCount 2,
+  //   3<TAB>"tail4"<TAB>v                       noteLens [4, 70009, 5]
+  //
+  // A 70 KB field silently came back as two empty ones and an extra row appeared.
+  // Ground truth is csv.reader on the exact bytes (see
+  // scripts/sample-boundary-check.py: 135 of 200 generated files mis-parsed).
+  const big = 'y'.repeat(70000);
+  const note = 'line one\n' + big;
+  const text = 'id\tnote\n1\t"' + note + '"\n2\tplain\n';
+  assert.ok(text.length > 65536, 'the sample really is truncated');
+
+  const t = parseCsv(text, { types: 'all-string' });
+  assert.strictEqual(t.quote, '"', 'the quote character is not swapped');
+  assert.strictEqual(t.rowCount, 2);
+  assert.deepStrictEqual(t.rows.map((r) => String(r[1]).length), [note.length, 5]);
+
+  // The same bytes with the sample covering the whole file always worked; that is
+  // the behaviour the truncated path now has to reach too.
+  const full = parseCsv(text, { sampleSize: text.length, types: 'all-string' });
+  assert.deepStrictEqual(full.rows, t.rows);
+  assert.strictEqual(full.quote, '"');
+
+  // A field that really is unterminated still fails, and so does the case both
+  // candidates strand an opener on -- which is the reading sniff()'s flag exists
+  // to catch. Neither is rescued by the lookahead.
+  //
+  // Note what is NOT asserted: a lone unterminated `"` with no `'` on the file
+  // is read as text under `'`, before and after this change alike, because one
+  // reading terminates and the fallback is a whole-file reading rather than a
+  // rejection. That is the pre-existing fallback contract, not sample-boundary
+  // behaviour, so it is left exactly as it was.
+  assert.throws(
+    () => parseCsv("a,b\nc,\"unterminated\nd,'dangling\n"),
+    /unterminated quoted field/
+  );
+
+  // An escaped pair straddling the boundary is one literal quote, not two openers.
+  const esc = 'a,b\n1,"he said ""hi"""' + 'y'.repeat(70000) + '"\n2,z\n';
+  assert.strictEqual(parseCsv(esc, { types: 'all-string' }).quote, '"');
+
+  // sniff() itself is unchanged without an extension: it still reports the
+  // stranded opener. detectDialect() is what decides a truncated sample is not
+  // the whole file, and it needs `full` to do that.
+  assert.strictEqual(sniff('"unterminated\tfield', '"').unterminated, true);
+  const cut = text.slice(0, 65536);
+  assert.deepStrictEqual(detectDialect(cut), { delimiter: '\t', quote: "'" },
+    'sample alone still reads as stranded');
+  assert.deepStrictEqual(detectDialect(cut, { full: text }), { delimiter: '\t', quote: '"' },
+    'with the tail, the correct quote character survives');
+
+  // The lookahead is bounded: a capped scan that is still open stays rejected.
+  assert.strictEqual(sniffExtension('x'.repeat(500000), 10).length, 262144);
+  assert.strictEqual(sniffExtension('abc', 3), '', 'nothing to extend');
 });
 
 test('parse: sniff reports an unterminated quote rather than inventing tallies', () => {
