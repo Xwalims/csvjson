@@ -490,16 +490,37 @@ function parseCsv(input, options = {}) {
     };
   }
 
-  // The header record, when present, is excluded from ragged reconciliation
-  // unless it is itself the odd one out; header width defines the column count.
+  // A blank line is not a header. `records[0]` is the first RECORD, and a file
+  // that opens with an empty line has no header until the first line that
+  // actually holds cells. Taking the blank as the header made it a one-column
+  // header named "", so every real record was over-wide against it and --ragged
+  // pad truncated the overflow: `\na,b\n1,2\n` came back as `\na\n1\n`, with
+  // column b and every value in it silently gone. The tokenizer already
+  // distinguishes a blank line from a row of empty cells; the header must use
+  // that same distinction rather than index 0.
+  //
+  // Leading blanks are demoted, not discarded: they go to the front of the
+  // body, where they stay blank lines. That shifts the blank down one line
+  // instead of deleting a column, and it is a fixed point -- reading the
+  // output back gives the same table.
   let header = null;
   let body = records;
   if (opts.header !== false) {
-    header = records[0].fields.slice();
-    body = records.slice(1);
+    const first = records.findIndex((rec) => !rec.blank);
+    if (first === -1) {
+      // Nothing but empty lines, so there is no header to name. Every line is
+      // still a record and is kept as one.
+      body = records;
+    } else {
+      header = records[first].fields.slice();
+      body = records.slice(0, first).concat(records.slice(first + 1));
+    }
   }
 
-  const expectedWidth = opts.header !== false
+  // With no header there are no column names to fix the width, so the widest
+  // record sets it -- and an all-blank file has no cells at all, which is a
+  // width of 0 rather than a crash on header.length.
+  const expectedWidth = header
     ? header.length
     : body.reduce((m, r) => Math.max(m, r.fields.length), 0);
 

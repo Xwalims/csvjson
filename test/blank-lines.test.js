@@ -95,12 +95,50 @@ test('blank line: a quoted empty field still pads as a row of empty cells', () =
   assert.deepStrictEqual(parsed.rows, [['', '']]);
 });
 
-test('blank line: a blank header row is still a header', () => {
-  // The leading blank line is consumed as the header record, so it names one
-  // (unnamed) column; the data row keeps its single cell.
+test('blank line: a leading blank line is not the header row', () => {
+  // Regression, and a data-loss bug. The header was taken as `records[0]`, so a
+  // file opening with an empty line got a one-column header named "" -- and
+  // every real record was then over-wide against it, so the default --ragged pad
+  // truncated the overflow. `\na,b\n1,2\n` parsed to header [""], rows [["a"],
+  // ["1"]]: column b, and every value in it, silently gone.
+  //
+  // Ground truth is python's csv.reader, an independent implementation: for the
+  // same two files it yields [[], ['1', '2']] and [['1', '2']] respectively --
+  // two records against one. A blank line is a record that holds no cells, so
+  // it cannot be the record that names the columns.
   const parsed = parseCsv('\n1,2\n', { types: 'all-string' });
-  assert.deepStrictEqual(parsed.header, ['']);
-  assert.deepStrictEqual(parsed.rows, [['1']]);
+  assert.deepStrictEqual(parsed.header, ['1', '2']);
+  assert.deepStrictEqual(parsed.rows, [[]]);
+
+  // The blank line is demoted into the body rather than dropped, so it survives
+  // as a blank line instead of costing a column.
+  const withHeader = parseCsv('\na,b\n1,2\n', { types: 'all-string' });
+  assert.deepStrictEqual(withHeader.header, ['a', 'b']);
+  assert.deepStrictEqual(withHeader.rows, [[], ['1', '2']]);
+  assert.deepStrictEqual(withHeader.ragged, [], 'a leading blank line is not malformed');
+});
+
+test('blank line: a leading blank line shifts down instead of deleting a column', () => {
+  // The fix demotes the blank rather than discarding it, which moves it one
+  // line down. What it must never do is change the table's width -- that is the
+  // part that lost data.
+  const src = '\n\na,b\n1,2\n';
+  const parsed = parseCsv(src, { types: 'all-string' });
+  assert.deepStrictEqual(parsed.header, ['a', 'b']);
+  assert.deepStrictEqual(parsed.rows, [[], [], ['1', '2']]);
+  // Fixed point: parsing the output again yields the same header and rows.
+  const again = parseCsv(write(parsed), { types: 'all-string' });
+  assert.deepStrictEqual(again.header, parsed.header);
+  assert.deepStrictEqual(again.rows, parsed.rows);
+});
+
+test('blank line: a file of only blank lines has no header', () => {
+  // No line holds cells, so there is nothing to name the columns. header is null
+  // and every line stays a record, rather than one blank line being promoted to
+  // a one-column header.
+  const parsed = parseCsv('\n\n\n');
+  assert.strictEqual(parsed.header, null);
+  assert.deepStrictEqual(parsed.rows, [[], [], []]);
 });
 
 test('blank line: CRLF blank lines behave like LF blank lines', () => {
